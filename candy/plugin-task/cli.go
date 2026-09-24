@@ -61,8 +61,10 @@ func runTaskCLI(ctx context.Context, ex *sdk.Executor, args []string) error {
 			return rerr
 		}
 		results = append(results, r)
-		// A hard ERROR (aborted precondition / dir failure / no TTY) always stops the
-		// closure — there is nothing to continue with.
+		// A hard ERROR (aborted precondition / dir failure / no TTY) stops the closure
+		// — there is nothing to continue with. In --json mode we still emit the
+		// collected results before returning the error (below) so the report is not
+		// lost; the non-json path prints as it goes.
 		if r.Status == "error" && !opts.json {
 			printResultText(r)
 			return fmt.Errorf("task %q failed: %s", n, r.Message)
@@ -70,17 +72,20 @@ func runTaskCLI(ctx context.Context, ex *sdk.Executor, args []string) error {
 	}
 
 	if opts.json {
-		return printResultsJSON(results)
+		if perr := printResultsJSON(results); perr != nil {
+			return perr
+		}
+	} else {
+		for _, r := range results {
+			printResultText(r)
+		}
 	}
-	for _, r := range results {
-		printResultText(r)
-	}
-	// Exit non-zero when a task's steps failed AND the task does not opt out via
-	// continue_on_error (Go-Task's semantics: the flag lets later tasks run and the
-	// overall run still reports the failure in --json, but a plain run exits 0).
+	// Exit non-zero when a task aborted or a step failed AND the task does not opt
+	// out via continue_on_error — uniformly in text and --json modes (Go-Task's flag
+	// lets LATER tasks run, it does not suppress the run's non-zero exit).
 	for _, r := range results {
 		if r.Status == "error" {
-			return fmt.Errorf("task %q failed", r.Name)
+			return fmt.Errorf("task %q failed: %s", r.Name, r.Message)
 		}
 		if r.Status == "ran" && r.Failed > 0 && !r.ContinueOnError {
 			return fmt.Errorf("task %q failed (%s)", r.Name, r.Message)
