@@ -35,7 +35,7 @@ import taskplugin "github.com/opencharly/plugin-task/candy/plugin-task"
 func init() { registerCompiledPlugin(taskplugin.NewProvider(), taskplugin.NewMeta()) }
 GO
 
-export GOTMPDIR="${GOTMPDIR:-$HOME/.cache/go-tmp}"
+export GOTMPDIR="${GOTMPDIR:-$(mktemp -d)}"
 export GOWORK=off
 export GOFLAGS=-mod=mod
 (
