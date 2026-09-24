@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/opencharly/plugin-task/candy/plugin-task/params"
@@ -51,13 +50,21 @@ func runTaskCLI(ctx context.Context, ex *sdk.Executor, args []string) error {
 
 	var results []*runResult
 	for _, n := range order {
-		r, rerr := runTask(ctx, ex, ts, n, opts.params, opts.force, opts.dryRun)
+		// Resolve the task's params (declared defaults <- CLI overrides) BEFORE the
+		// run, so required-param errors surface up front.
+		resolved, perr := resolveParams(ts.tasks[n], opts.params)
+		if perr != nil {
+			return fmt.Errorf("task %q: %w", n, perr)
+		}
+		r, rerr := runTask(ctx, ex, ts, n, resolved, opts.force, opts.dryRun)
 		if rerr != nil {
 			return rerr
 		}
 		results = append(results, r)
+		// A hard ERROR (aborted precondition / dir failure / no TTY) always stops the
+		// closure — there is nothing to continue with.
 		if r.Status == "error" && !opts.json {
-			printResultText(nil, r)
+			printResultText(r)
 			return fmt.Errorf("task %q failed: %s", n, r.Message)
 		}
 	}
@@ -66,12 +73,17 @@ func runTaskCLI(ctx context.Context, ex *sdk.Executor, args []string) error {
 		return printResultsJSON(results)
 	}
 	for _, r := range results {
-		printResultText(ts, r)
+		printResultText(r)
 	}
-	// A failed step (non-continue_on_error) exits non-zero.
+	// Exit non-zero when a task's steps failed AND the task does not opt out via
+	// continue_on_error (Go-Task's semantics: the flag lets later tasks run and the
+	// overall run still reports the failure in --json, but a plain run exits 0).
 	for _, r := range results {
-		if r.Status == "error" || (r.Status == "ran" && r.Failed > 0) {
+		if r.Status == "error" {
 			return fmt.Errorf("task %q failed", r.Name)
+		}
+		if r.Status == "ran" && r.Failed > 0 && !r.ContinueOnError {
+			return fmt.Errorf("task %q failed (%s)", r.Name, r.Message)
 		}
 	}
 	return nil
@@ -159,7 +171,7 @@ func printList(ts *taskSet, asJSON bool) error {
 	return nil
 }
 
-func printResultText(ts *taskSet, r *runResult) {
+func printResultText(r *runResult) {
 	switch r.Status {
 	case "up-to-date":
 		fmt.Fprintf(outWriter(), "task %s: %s\n", r.Name, r.Message)
@@ -168,6 +180,11 @@ func printResultText(ts *taskSet, r *runResult) {
 	case "error":
 		fmt.Fprintf(outWriter(), "task %s: ERROR — %s\n", r.Name, r.Message)
 	default:
+		// silent: true suppresses the per-step lines, keeping only the summary.
+		if r.Silent {
+			fmt.Fprintf(outWriter(), "task %s: %d step(s), %d failed\n", r.Name, len(r.Steps), r.Failed)
+			return
+		}
 		fmt.Fprintf(outWriter(), "task %s: %d step(s), %d failed\n", r.Name, len(r.Steps), r.Failed)
 		for _, s := range r.Steps {
 			fmt.Fprintf(outWriter(), "  [%s] %s — %s\n", s.Result.Status.String(), s.Keyword, firstLine(s.Text))
@@ -204,8 +221,8 @@ func printResultsJSON(results []*runResult) error {
 
 // invokeOpRun dispatches an OpRun request. A command:task invocation carries the
 // charly command envelope `{"args":[...]}`; a verb:task step carries the typed
-// plugin_input `{"task":..., "param":[...]}`. The two are distinguished by which
-// shape the params JSON matches (the command envelope's "args" key).
+// plugin_input `{"task":..., "param":[...]}`. The two are distinguished by the
+// command envelope's "args" key.
 func invokeOpRun(ctx context.Context, req *pb.InvokeRequest) (*pb.InvokeReply, error) {
 	ex, err := sdk.ExecutorForInvoke(ctx, req.GetExecutorBrokerId())
 	if err != nil {
@@ -236,11 +253,11 @@ func invokeOpRun(ctx context.Context, req *pb.InvokeRequest) (*pb.InvokeReply, e
 	if lerr != nil {
 		return nil, lerr
 	}
-	params_ := map[string]string{}
+	cli := map[string]string{}
 	for _, kv := range in.Param {
 		k, v, ok := strings.Cut(kv, "=")
 		if ok {
-			params_[k] = v
+			cli[k] = v
 		}
 	}
 	order, cerr := ts.closure([]string{in.Task})
@@ -248,11 +265,15 @@ func invokeOpRun(ctx context.Context, req *pb.InvokeRequest) (*pb.InvokeReply, e
 		return nil, cerr
 	}
 	for _, n := range order {
-		r, rerr := runTask(ctx, ex, ts, n, params_, false, false)
+		resolved, perr := resolveParams(ts.tasks[n], cli)
+		if perr != nil {
+			return nil, fmt.Errorf("task %q: %w", n, perr)
+		}
+		r, rerr := runTask(ctx, ex, ts, n, resolved, false, false)
 		if rerr != nil {
 			return nil, rerr
 		}
-		if r.Status == "error" || (r.Status == "ran" && r.Failed > 0) {
+		if r.Status == "error" || (r.Status == "ran" && r.Failed > 0 && !r.ContinueOnError) {
 			return nil, fmt.Errorf("task %q failed: %s", n, r.Message)
 		}
 	}
@@ -268,5 +289,3 @@ func firstLine(s string) string {
 
 // outWriter is os.Stdout (indirection kept for tests).
 func outWriter() io.Writer { return os.Stdout }
-
-var _ = sort.Strings

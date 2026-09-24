@@ -118,11 +118,82 @@ func TestInvokeValidate(t *testing.T) {
 	}
 }
 
-// TestExpandParams proves ${VAR} / $VAR substitution for dir resolution.
-func TestExpandParams(t *testing.T) {
-	got := expandParams("${ROOT}/src/$SUBDIR", map[string]string{"ROOT": "/w", "SUBDIR": "x"})
+// TestExpandVars proves ${VAR} / $VAR substitution for dir resolution.
+func TestExpandVars(t *testing.T) {
+	got := expandVars("${ROOT}/src/$SUBDIR", map[string]string{"ROOT": "/w", "SUBDIR": "x"})
 	if got != "/w/src/x" {
-		t.Fatalf("expandParams = %q, want /w/src/x", got)
+		t.Fatalf("expandVars = %q, want /w/src/x", got)
+	}
+}
+
+// TestResolveParams proves declared defaults fill CLI gaps and required params are
+// enforced.
+func TestResolveParams(t *testing.T) {
+	task := spec.Task{Params: map[string]spec.TaskParamSpec{
+		"WITH_DEFAULT": {Default: "d"},
+		"REQUIRED":     {Required: true},
+	}}
+	// CLI override wins; default fills the other.
+	got, err := resolveParams(task, map[string]string{"REQUIRED": "r", "WITH_DEFAULT": "cli"})
+	if err != nil {
+		t.Fatalf("resolveParams: %v", err)
+	}
+	if got["WITH_DEFAULT"] != "cli" || got["REQUIRED"] != "r" {
+		t.Fatalf("resolveParams = %v", got)
+	}
+	// Default applies when not overridden.
+	got, err = resolveParams(task, map[string]string{"REQUIRED": "r"})
+	if err != nil || got["WITH_DEFAULT"] != "d" {
+		t.Fatalf("default not applied: %v (%v)", got, err)
+	}
+	// A missing required param errors.
+	if _, err := resolveParams(task, nil); err == nil {
+		t.Fatal("a missing required param must error")
+	}
+}
+
+// TestRunTask_ContinueOnError proves the flag is carried onto the result so the CLI
+// can honor it (a failed step under continue_on_error does not fail the run).
+func TestRunTask_ContinueOnError(t *testing.T) {
+	ts := &taskSet{dir: t.TempDir(), tasks: map[string]spec.Task{
+		"t": {Description: "c", ContinueOnError: true, Plan: []spec.Step{{Run: "x", Op: spec.Op{Command: "true"}}}},
+	}}
+	res, err := runTask(context.Background(), nil, ts, "t", nil, false, true)
+	if err != nil {
+		t.Fatalf("runTask: %v", err)
+	}
+	if !res.ContinueOnError {
+		t.Fatal("continue_on_error must be carried onto the result")
+	}
+}
+
+// TestRunTask_Silent proves silent is carried onto the result (the CLI suppresses the
+// per-step lines for it).
+func TestRunTask_Silent(t *testing.T) {
+	ts := &taskSet{dir: t.TempDir(), tasks: map[string]spec.Task{
+		"t": {Description: "s", Silent: true, Plan: []spec.Step{{Run: "x", Op: spec.Op{Command: "true"}}}},
+	}}
+	res, err := runTask(context.Background(), nil, ts, "t", nil, false, true)
+	if err != nil {
+		t.Fatalf("runTask: %v", err)
+	}
+	if !res.Silent {
+		t.Fatal("silent must be carried onto the result")
+	}
+}
+
+// TestRunTask_InteractiveNoTTY proves an interactive task refuses to run without a TTY
+// (test stdin is not a terminal).
+func TestRunTask_InteractiveNoTTY(t *testing.T) {
+	ts := &taskSet{dir: t.TempDir(), tasks: map[string]spec.Task{
+		"t": {Description: "i", Interactive: true, Plan: []spec.Step{{Run: "x", Op: spec.Op{Command: "true"}}}},
+	}}
+	res, err := runTask(context.Background(), nil, ts, "t", nil, false, false)
+	if err != nil {
+		t.Fatalf("runTask: %v", err)
+	}
+	if res.Status != "error" {
+		t.Fatalf("an interactive task without a TTY must error, got %q", res.Status)
 	}
 }
 

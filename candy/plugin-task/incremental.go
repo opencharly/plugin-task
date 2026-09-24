@@ -20,10 +20,11 @@ import (
 //
 // An absent signal is not "up to date" (a task with no status/sources always runs).
 func taskUpToDate(ctx context.Context, dir string, t spec.Task, params map[string]string) (bool, string) {
+	env := mergedEnv(t, params)
 	if len(t.Status) > 0 {
 		allOK := true
 		for _, cmd := range t.Status {
-			code, err := runHostShell(ctx, dir, t.Env, params, cmd)
+			code, err := runHostShell(ctx, dir, env, cmd)
 			if err != nil || code != 0 {
 				allOK = false
 				break

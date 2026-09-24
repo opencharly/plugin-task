@@ -5,6 +5,7 @@ go 1.26.4
 require (
 	github.com/opencharly/sdk v0.2026266.1111
 	github.com/opencharly/spec v0.2026267.834
+	golang.org/x/term v0.45.0
 )
 
 require (
@@ -29,7 +30,6 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20231106174013-bbf56f31fb17 // indirect
 	google.golang.org/grpc v1.61.0 // indirect

@@ -20,7 +20,7 @@ compiled into charly.
 build:
   task:
     description: Build the charly binary
-    dir: "$HOME/src/charly"
+    dir: "$HOME/src/charly"      # $HOME, the task vars, and resolved params all expand
     vars: {CALVER: "2026.267.1200"}
     depends_on: [tidy]
     sources: ["charly/**/*.go", "go.work.sum"]
@@ -49,8 +49,10 @@ charly task --all                 # every task in dependency order
 ## Full Go-Task parity
 
 `description`, `dir`, `env`, `vars`, `depends_on`, `sources`, `generates`, `status`,
-`preconditions`, `silent`, `interactive`, `platforms`, `exclude_platforms`, `timeout`,
-`continue_on_error`, `params`, and the ordered `plan:`.
+`preconditions`, `silent`, `interactive` (refuses to run without a TTY rather than
+silently capturing output), `platforms`, `exclude_platforms`, `timeout` (a ceiling
+over the walk), `continue_on_error`, `params` (declared defaults overlaid with
+`--param` overrides; `required: true` is enforced), and the ordered `plan:`.
 
 ## Design
 
@@ -60,5 +62,6 @@ The engine reuses the SDK's existing plan machinery — no second execution engi
 - `checkkit.VerbResolver` dispatches each step's verb through the host's provider
   registry over the reverse channel (`InvokeProvider`), so a task can use any verb,
   any plugin verb, `include:` composition, and `agent-*` steps.
-- `kit.ShellExecutor{}` (wrapped by a directory-honoring executor for `dir:`) is the
-  host venue.
+- `kit.ShellExecutor{}` is the host venue; `dir:` is applied by chdir around the
+  sequential walk (the plan grammar has no cwd field), and `${VAR}`/`$VAR` in `dir:`
+  and env expand against the task's vars, params, and the process environment.

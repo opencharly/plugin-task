@@ -27,8 +27,22 @@ plugin-task:
             primary:
                 task: task
         plan:
-            - check: the task plugin ships a buildable Go module (go.mod + the provider package) compiled into charly; its kind:task decode + command:task CLI + verb:task step are exercised by the check-task-* beds and by every repo whose charly.yml declares tasks
+            - check: the task plugin ships its self-contained CUE schema and provider entrypoint (the files the host reads over Describe and host-builds) — a deterministic probe that fails if either is missing
               id: task-module-present
+              file:
+                file: candy/plugin-task/plugin.go
+                exists: true
               context:
                 - build
-              command: "true"
+            - check: the plugin's self-contained CUE schema is present (served over Describe; the host gate rejects a schema-less input-def plugin)
+              id: task-schema-present
+              file:
+                file: candy/plugin-task/schema/task.cue
+                exists: true
+              context:
+                - build
+            - check: the provider source declares all three capabilities (kind:task, command:task, verb:task) — a deterministic probe that fails if a capability is dropped
+              id: task-capabilities-declared
+              context:
+                - build
+              command: "grep -q 'Class: \"kind\", Word: \"task\"' plugin.go && grep -q 'Class: \"command\", Word: \"task\"' plugin.go && grep -q 'Class: \"verb\", Word: \"task\"' plugin.go"

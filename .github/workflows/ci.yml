@@ -1,10 +1,10 @@
 # The Go gates for this plugin's own module.
 #
-# The stock plugin repos carry no Go CI (their candies were thin); THIS one
-# ships a real Go module with a vendored device client, so the rulebook's
-# "tests that can fail" (R7) requires a gate that actually runs them:
-# gofmt, the configured golangci-lint set, the formatter-class diff,
-# go vet, and the unit tests (which drive a fake JetKVM device).
+# plugin-task ships a real Go module (go.mod + the provider package), so the
+# rulebook's "tests that can fail" (R7) requires a gate that actually runs them:
+# gofmt, the configured golangci-lint set, go vet, and the unit tests (which
+# exercise the dependency closure, CLI parsing, validation, and incremental
+# semantics).
 name: ci
 
 on:

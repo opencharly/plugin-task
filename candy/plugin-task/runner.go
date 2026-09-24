@@ -8,6 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"golang.org/x/term"
 
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/checkkit"
@@ -68,17 +71,23 @@ type runResult struct {
 	Failed  int
 	Status  string // "ran" | "up-to-date" | "skipped-platform" | "error"
 	Message string
+	// ContinueOnError / Silent are carried from the task so the CLI decides the
+	// exit status and output shape without re-reading the entity.
+	ContinueOnError bool
+	Silent          bool
 }
 
-// runTask runs ONE task's own plan (dependencies are driven by runClosure), honoring
-// the platform gate, preconditions, and the incremental staleness model. It never
-// recurses into depends_on.
+// runTask runs ONE task's own plan (dependencies are driven by the closure walk in
+// the CLI), honoring the platform gate, preconditions, the incremental staleness
+// model, the interactive guard, and the task timeout. It never recurses into
+// depends_on. params is the RESOLVED parameter set (declared defaults overlaid with
+// CLI overrides — see resolveParams).
 func runTask(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, params map[string]string, force, dryRun bool) (*runResult, error) {
 	t, ok := ts.tasks[name]
 	if !ok {
 		return nil, fmt.Errorf("unknown task %q (declared tasks: %s)", name, strings.Join(ts.names(), ", "))
 	}
-	res := &runResult{Name: name}
+	res := &runResult{Name: name, ContinueOnError: t.ContinueOnError, Silent: t.Silent}
 
 	if reason := platformSkip(t); reason != "" {
 		res.Status = "skipped-platform"
@@ -86,11 +95,20 @@ func runTask(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, pa
 		return res, nil
 	}
 
-	dir := resolveTaskDir(ts.dir, t.Dir, params)
+	// interactive: true — the task requires a terminal (a prompt, an editor, a
+	// password read). Refuse to run it without one rather than silently capturing
+	// output. Stdin is a character device iff it is a real TTY.
+	if t.Interactive && !stdinIsTerminal() {
+		res.Status = "error"
+		res.Message = "task is interactive: true but stdin is not a terminal"
+		return res, nil
+	}
+
+	dir := resolveTaskDir(ts.dir, t.Dir, mergedEnv(t, params))
 
 	// preconditions — a failing precondition ABORTS (never a silent skip).
 	for _, pc := range t.Preconditions {
-		if code, err := runHostShell(ctx, dir, t.Env, params, pc); err != nil || code != 0 {
+		if code, err := runHostShell(ctx, dir, mergedEnv(t, params), pc); err != nil || code != 0 {
 			res.Status = "error"
 			res.Message = fmt.Sprintf("precondition failed: %s (exit %d)", pc, code)
 			return res, nil
@@ -113,6 +131,16 @@ func runTask(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, pa
 		return res, nil
 	}
 
+	// timeout: a task-level ceiling over the whole plan walk.
+	walkCtx := ctx
+	if t.Timeout != "" {
+		if d, derr := time.ParseDuration(t.Timeout); derr == nil && d > 0 {
+			var cancel context.CancelFunc
+			walkCtx, cancel = context.WithTimeout(ctx, d)
+			defer cancel()
+		}
+	}
+
 	runner := newTaskRunner(ex, ts.dir, t, params)
 	set := &spec.LabelDescriptionSet{
 		Candy: []spec.LabeledDescription{{Origin: "task:" + name, Description: t.Description, Plan: t.Plan}},
@@ -132,7 +160,7 @@ func runTask(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, pa
 			defer func() { _ = os.Chdir(old) }()
 		}
 	}
-	steps := kit.RunPlan(ctx, runner, set, false)
+	steps := kit.RunPlan(walkCtx, runner, set, false)
 	res.Steps = steps
 	for _, s := range steps {
 		if s.Result.Status == spec.StatusFail {
@@ -140,7 +168,7 @@ func runTask(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, pa
 		}
 	}
 	res.Status = "ran"
-	if res.Failed > 0 && !t.ContinueOnError {
+	if res.Failed > 0 {
 		res.Message = fmt.Sprintf("%d step(s) failed", res.Failed)
 	}
 	return res, nil
@@ -149,19 +177,10 @@ func runTask(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, pa
 // newTaskRunner builds the kit.Runner the plan walk drives: a host ShellExecutor
 // venue, a checkkit.VerbResolver over the reverse-channel executor (so each step's
 // verb dispatches through the host provider registry), and an env carrying the
-// task's vars + params + env for ${VAR} expansion.
+// task's vars + resolved params + env for ${VAR} expansion.
 func newTaskRunner(ex *sdk.Executor, projDir string, t spec.Task, params map[string]string) *kit.Runner {
-	env := map[string]string{}
-	for k, v := range t.Vars {
-		env[k] = v
-	}
-	for k, v := range t.Env {
-		env[k] = v
-	}
-	for k, v := range params {
-		env[k] = v
-	}
-	env["TASK_DIR"] = resolveTaskDir(projDir, t.Dir, params)
+	env := mergedEnv(t, params)
+	env["TASK_DIR"] = resolveTaskDir(projDir, t.Dir, env)
 
 	// The plan walk requires a Verbs resolver; command:task is compiled-in so the
 	// reverse-channel executor is always present. A nil ex (out-of-process CliMain)
@@ -181,6 +200,50 @@ func newTaskRunner(ex *sdk.Executor, projDir string, t spec.Task, params map[str
 	return r
 }
 
+// mergedEnv is the variable map every step + the dir resolution sees: the task's
+// vars, then its env, then the RESOLVED params (declared defaults overlaid with CLI
+// overrides — see resolveParams). Later sources win on a key collision.
+func mergedEnv(t spec.Task, params map[string]string) map[string]string {
+	env := map[string]string{}
+	for k, v := range t.Vars {
+		env[k] = v
+	}
+	for k, v := range t.Env {
+		env[k] = v
+	}
+	for k, v := range params {
+		env[k] = v
+	}
+	return env
+}
+
+// resolveParams overlays the task's declared `params:` defaults with the CLI-supplied
+// overrides, and enforces `required: true`. A required param with neither an override
+// nor a default is a hard error (the caller surfaces it).
+func resolveParams(t spec.Task, cli map[string]string) (map[string]string, error) {
+	out := map[string]string{}
+	for name, spec := range t.Params {
+		if v, ok := cli[name]; ok {
+			out[name] = v
+			continue
+		}
+		if spec.Default != nil {
+			out[name] = fmt.Sprint(spec.Default)
+			continue
+		}
+		if spec.Required {
+			return nil, fmt.Errorf("required parameter %q not supplied (--param %s=VALUE)", name, name)
+		}
+	}
+	// Pass through any CLI param not declared (forward-compat, and vars-like usage).
+	for k, v := range cli {
+		if _, declared := t.Params[k]; !declared {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
 func (ts *taskSet) names() []string {
 	out := make([]string, 0, len(ts.tasks))
 	for n := range ts.tasks {
@@ -189,39 +252,48 @@ func (ts *taskSet) names() []string {
 	return out
 }
 
-// resolveTaskDir resolves a task's dir against the project root, expanding ${VAR}
-// references from the params first (so dir: "${WORKDIR}/src" works).
-func resolveTaskDir(projDir, dir string, params map[string]string) string {
+// resolveTaskDir resolves a task's dir against the project root, expanding ${VAR} /
+// $VAR references against the merged task env (so `dir: "$HOME/src"` and
+// `dir: "${WORKDIR}/src"` both work).
+func resolveTaskDir(projDir, dir string, env map[string]string) string {
 	if dir == "" {
 		return projDir
 	}
-	dir = expandParams(dir, params)
+	dir = expandVars(dir, env)
 	if !filepath.IsAbs(dir) {
 		dir = filepath.Join(projDir, dir)
 	}
 	return dir
 }
 
-func expandParams(s string, params map[string]string) string {
-	for k, v := range params {
-		s = strings.ReplaceAll(s, "${"+k+"}", v)
-		s = strings.ReplaceAll(s, "$"+k, v)
-	}
-	return s
+// expandVars substitutes ${VAR} and $VAR using env first, then the process
+// environment — so a task's dir/command can reference HOME, the project vars, and
+// resolved params uniformly.
+func expandVars(s string, env map[string]string) string {
+	return os.Expand(s, func(key string) string {
+		if v, ok := env[key]; ok {
+			return v
+		}
+		return os.Getenv(key)
+	})
 }
 
-// runHostShell runs a shell snippet on the HOST in dir, with the task's env + params
-// exported, returning its exit code. Used for preconditions/status — a task is a
-// host-native construct, so os/exec is the venue here (the SAME mechanism
-// ShellExecutor/RunCapture uses).
-func runHostShell(ctx context.Context, dir string, env map[string]string, params map[string]string, script string) (int, error) {
+// stdinIsTerminal reports whether stdin is a real terminal (via the terminal
+// ioctl, not a character-device heuristic — /dev/null is a char device but NOT a
+// terminal, which a Stat-based check wrongly accepts).
+func stdinIsTerminal() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// runHostShell runs a shell snippet on the HOST in dir, with the merged env exported,
+// returning its exit code. Used for preconditions/status — a task is a host-native
+// construct, so os/exec is the venue here (the SAME mechanism ShellExecutor/RunCapture
+// uses).
+func runHostShell(ctx context.Context, dir string, env map[string]string, script string) (int, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", script)
 	cmd.Dir = dir
 	cmd.Env = os.Environ()
 	for k, v := range env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
-	for k, v := range params {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	err := cmd.Run()
