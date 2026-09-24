@@ -186,12 +186,11 @@ func printResultText(r *runResult) {
 	case "error":
 		fmt.Fprintf(outWriter(), "task %s: ERROR — %s\n", r.Name, r.Message)
 	default:
-		// silent: true suppresses the per-step lines, keeping only the summary.
+		fmt.Fprintf(outWriter(), "task %s: %d step(s), %d failed\n", r.Name, len(r.Steps), r.Failed)
+		// silent: true keeps only the summary, suppressing the per-step lines.
 		if r.Silent {
-			fmt.Fprintf(outWriter(), "task %s: %d step(s), %d failed\n", r.Name, len(r.Steps), r.Failed)
 			return
 		}
-		fmt.Fprintf(outWriter(), "task %s: %d step(s), %d failed\n", r.Name, len(r.Steps), r.Failed)
 		for _, s := range r.Steps {
 			fmt.Fprintf(outWriter(), "  [%s] %s — %s\n", s.Result.Status.String(), s.Keyword, firstLine(s.Text))
 		}
