@@ -117,6 +117,21 @@ func runTask(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, pa
 	set := &spec.LabelDescriptionSet{
 		Candy: []spec.LabeledDescription{{Origin: "task:" + name, Description: t.Description, Plan: t.Plan}},
 	}
+	// dir: parity. The plan-step grammar has no cwd field and the host `command` verb
+	// runs through the in-process ShellExecutor (whose cwd is the process cwd), so the
+	// task's workdir is applied by chdir around the walk and restored after. The task
+	// CLI is a single-threaded host command (RunPlan walks sequentially in one
+	// goroutine), so this is safe and is exactly Go-Task's `dir:` semantics.
+	if dir != ts.dir {
+		if old, gerr := os.Getwd(); gerr == nil {
+			if cerr := os.Chdir(dir); cerr != nil {
+				res.Status = "error"
+				res.Message = fmt.Sprintf("cannot enter task dir %q: %v", dir, cerr)
+				return res, nil
+			}
+			defer func() { _ = os.Chdir(old) }()
+		}
+	}
 	steps := kit.RunPlan(ctx, runner, set, false)
 	res.Steps = steps
 	for _, s := range steps {
@@ -150,18 +165,17 @@ func newTaskRunner(ex *sdk.Executor, projDir string, t spec.Task, params map[str
 
 	// The plan walk requires a Verbs resolver; command:task is compiled-in so the
 	// reverse-channel executor is always present. A nil ex (out-of-process CliMain)
-	// is rejected at the CLI entry, so this is unreachable in practice.
+	// is rejected at the CLI entry, so this is unreachable in practice. Exec MUST be
+	// a spec.DeployExecutor whose venue descriptor round-trips (kit.ShellExecutor is
+	// the "shell" arm of DescriptorFromExecutor) — a custom wrapper would serialize
+	// to no venue and the host would have nil exec (RCA of the first RDD run).
 	verbs := &checkkit.VerbResolver{Ex: ex, Env: spec.CheckEnv{Mode: "live", VenueKind: "host"}}
-	var exec kit.Executor = kit.ShellExecutor{}
-	if dir := resolveTaskDir(projDir, t.Dir, params); dir != "" {
-		exec = dirExecutor{inner: kit.ShellExecutor{}, dir: dir}
-	}
 	r := kit.NewRunner(kit.RunnerConfig{
-		Exec:    exec,
+		Exec:    kit.ShellExecutor{},
 		Mode:    kit.ModeLive,
 		Env:     env,
 		Verbs:   verbs,
-		Grammar: checkkit.PlanGrammar{},
+		Grammar: taskGrammar{base: checkkit.PlanGrammar{}},
 	})
 	verbs.SetRunner(r)
 	return r
