@@ -174,10 +174,18 @@ func runTask(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, pa
 	return res, nil
 }
 
+// verbResolverFor builds the plan walk's verb resolver. It is a package VARIABLE so a
+// test can substitute a fake and drive the REAL plan walk (the chdir/`dir:`
+// application, step order, verdict tallying) without a host reverse channel — the
+// verb dispatch itself is SDK code already covered by sdk/kit's own suite.
+var verbResolverFor = func(ex *sdk.Executor) kit.VerbResolver {
+	return &checkkit.VerbResolver{Ex: ex, Env: spec.CheckEnv{Mode: "live", VenueKind: "host"}}
+}
+
 // newTaskRunner builds the kit.Runner the plan walk drives: a host ShellExecutor
-// venue, a checkkit.VerbResolver over the reverse-channel executor (so each step's
-// verb dispatches through the host provider registry), and an env carrying the
-// task's vars + resolved params + env for ${VAR} expansion.
+// venue, the verb resolver (over the reverse-channel executor, so each step's verb
+// dispatches through the host provider registry), and an env carrying the task's
+// vars + resolved params + env for ${VAR} expansion.
 func newTaskRunner(ex *sdk.Executor, projDir string, t spec.Task, params map[string]string) *kit.Runner {
 	env := mergedEnv(t, params)
 	env["TASK_DIR"] = resolveTaskDir(projDir, t.Dir, env)
@@ -188,7 +196,7 @@ func newTaskRunner(ex *sdk.Executor, projDir string, t spec.Task, params map[str
 	// a spec.DeployExecutor whose venue descriptor round-trips (kit.ShellExecutor is
 	// the "shell" arm of DescriptorFromExecutor) — a custom wrapper would serialize
 	// to no venue and the host would have nil exec (RCA of the first RDD run).
-	verbs := &checkkit.VerbResolver{Ex: ex, Env: spec.CheckEnv{Mode: "live", VenueKind: "host"}}
+	verbs := verbResolverFor(ex)
 	r := kit.NewRunner(kit.RunnerConfig{
 		Exec:    kit.ShellExecutor{},
 		Mode:    kit.ModeLive,
@@ -196,7 +204,9 @@ func newTaskRunner(ex *sdk.Executor, projDir string, t spec.Task, params map[str
 		Verbs:   verbs,
 		Grammar: taskGrammar{base: checkkit.PlanGrammar{}},
 	})
-	verbs.SetRunner(r)
+	if sr, ok := verbs.(interface{ SetRunner(*kit.Runner) }); ok {
+		sr.SetRunner(r)
+	}
 	return r
 }
 

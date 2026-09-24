@@ -27,22 +27,13 @@ plugin-task:
             primary:
                 task: task
         plan:
-            - check: the task plugin ships its self-contained CUE schema and provider entrypoint (the files the host reads over Describe and host-builds) — a deterministic probe that fails if either is missing
+            - check: the plugin entrypoint, its self-contained CUE schema, and the generated params are all present in the candy directory — a deterministic probe that fails if any is missing
               id: task-module-present
-              file:
-                file: candy/plugin-task/plugin.go
-                exists: true
               context:
                 - build
-            - check: the plugin's self-contained CUE schema is present (served over Describe; the host gate rejects a schema-less input-def plugin)
-              id: task-schema-present
-              file:
-                file: candy/plugin-task/schema/task.cue
-                exists: true
-              context:
-                - build
+              command: "test -f plugin.go && test -f schema/task.cue && test -f params/cue_types_gen.go && echo 'plugin.go schema/task.cue params/cue_types_gen.go all present'"
             - check: the provider source declares all three capabilities (kind:task, command:task, verb:task) — a deterministic probe that fails if a capability is dropped
               id: task-capabilities-declared
               context:
                 - build
-              command: "grep -q 'Class: \"kind\", Word: \"task\"' plugin.go && grep -q 'Class: \"command\", Word: \"task\"' plugin.go && grep -q 'Class: \"verb\", Word: \"task\"' plugin.go"
+              command: "grep -q 'Class: \"kind\", Word: \"task\"' plugin.go && grep -q 'Class: \"command\", Word: \"task\"' plugin.go && grep -q 'Class: \"verb\", Word: \"task\"' plugin.go && echo 'kind/command/verb:task declared'"
