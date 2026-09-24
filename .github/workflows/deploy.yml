@@ -1,0 +1,52 @@
+# Gate the candy manifest against the pinned charly, AND execute the plugin's
+# changed code path live.
+#
+# plugin-task's command:task is compiled-in-only (it needs the host's loaded
+# project over the reverse channel), so a bare `charly box validate` against an
+# out-of-process plugin proves only the manifest. This gate builds a real charly
+# with candy/plugin-task compiled IN and drives `charly task` end to end —
+# `scripts/gate-task.sh`. The charly checkout is pinned to v2026.267.1938, the
+# tag carrying the host-value-gated kind seam (#TaskValue → spec.KindValueDefs +
+# foldHostValueGatedKind) this plugin's kind:task needs.
+name: candy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: candy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CHARLY_TAG: v2026.267.1938
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: candy/plugin-task/go.mod
+          cache-dependency-path: candy/plugin-task/go.sum
+
+      - name: Fetch the pinned charly source (CI-time temp checkout)
+        run: |
+          git clone --depth 1 --branch "$CHARLY_TAG" https://github.com/opencharly/charly.git /tmp/charly
+
+      - name: Build the pinned charly binary
+        run: |
+          mkdir -p /tmp/charly/bin
+          cd /tmp/charly/charly && go build -buildvcs=false -ldflags "-X main.BuildCalVer=candy-ci" -o /tmp/charly/bin/charly .
+
+      - name: The candy manifest validates at the pinned charly
+        run: /tmp/charly/bin/charly box validate
+
+      - name: The compiled-in command:task path executes live (R10 gate)
+        run: bash scripts/gate-task.sh

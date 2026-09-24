@@ -1,0 +1,39 @@
+version: 2026.249.2125
+plugin-task:
+    candy:
+        version: 2026.249.2125
+        description: |-
+            The generic declarative TASK runner for charly — the replacement for a
+            Taskfile. Serves three capabilities: `kind:task` (a named, host-native,
+            REUSABLE plan authored as a `task:` node in charly.yml, using the SAME
+            #Step/#Op grammar a candy's plan uses), `command:task` (`charly task
+            [list] [<name>] [--dry-run] [--json] [--param k=v] [--all]`), and
+            `verb:task` (compose a declared task into a candy/box/task plan). The
+            engine reuses kit.RunPlan + a checkkit.VerbResolver over
+            kit.ShellExecutor{} — the SAME engine candy/plugin-check drives — so there
+            is no second execution engine. Any task a repository needs (build, test,
+            lint, release, verify, notify) is a task entity; the task body is the
+            base-schema #Task, validated host-side against #TaskValue (a task's
+            `plan: [...#Step]` references the base #Step grammar, which a
+            self-contained plugin schema cannot carry). COMPILED-IN by default (the
+            command needs the host's loaded project over the reverse channel); the
+            kind/verb capabilities also serve out-of-process.
+        plugin:
+            source: github.com/opencharly/plugin-task/candy/plugin-task
+            providers:
+                - kind:task
+                - command:task
+                - verb:task
+            primary:
+                task: task
+        plan:
+            - check: the plugin entrypoint, its self-contained CUE schema, and the generated params are all present in the candy directory — a deterministic probe that fails if any is missing
+              id: task-module-present
+              context:
+                - build
+              command: "test -f plugin.go && test -f schema/task.cue && test -f params/cue_types_gen.go && echo 'plugin.go schema/task.cue params/cue_types_gen.go all present'"
+            - check: the provider source declares all three capabilities (kind:task, command:task, verb:task) — a deterministic probe that fails if a capability is dropped
+              id: task-capabilities-declared
+              context:
+                - build
+              command: "grep -q 'Class: \"kind\", Word: \"task\"' plugin.go && grep -q 'Class: \"command\", Word: \"task\"' plugin.go && grep -q 'Class: \"verb\", Word: \"task\"' plugin.go && echo 'kind/command/verb:task declared'"
