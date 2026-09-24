@@ -9,9 +9,6 @@ type TaskInput struct {
 	// task is the declared task entity name to run.
 	Task string `json:"task"`
 
-	// dir optionally overrides the task's working directory for this invocation.
-	Dir string `json:"dir,omitempty"`
-
 	// params are NAME=VALUE overrides for the task's declared params.
 	Param []string `json:"param,omitempty"`
 }

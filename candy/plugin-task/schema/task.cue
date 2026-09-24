@@ -15,8 +15,6 @@
 #TaskInput: {
 	// task is the declared task entity name to run.
 	task: string & !=""
-	// dir optionally overrides the task's working directory for this invocation.
-	dir?: string & !=""
 	// params are NAME=VALUE overrides for the task's declared params.
 	param?: [...string]
 }
