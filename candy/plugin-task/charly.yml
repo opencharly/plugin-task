@@ -1,0 +1,34 @@
+version: 2026.267.1200
+plugin-task:
+    candy:
+        version: 2026.267.1200
+        description: |-
+            The generic declarative TASK runner for charly — the replacement for a
+            Taskfile. Serves three capabilities: `kind:task` (a named, host-native,
+            REUSABLE plan authored as a `task:` node in charly.yml, using the SAME
+            #Step/#Op grammar a candy's plan uses), `command:task` (`charly task
+            [list] [<name>] [--dry-run] [--json] [--param k=v] [--all]`), and
+            `verb:task` (compose a declared task into a candy/box/task plan). The
+            engine reuses kit.RunPlan + a checkkit.VerbResolver over
+            kit.ShellExecutor{} — the SAME engine candy/plugin-check drives — so there
+            is no second execution engine. Any task a repository needs (build, test,
+            lint, release, verify, notify) is a task entity; the task body is the
+            base-schema #Task, validated host-side against #TaskValue (a task's
+            `plan: [...#Step]` references the base #Step grammar, which a
+            self-contained plugin schema cannot carry). COMPILED-IN by default (the
+            command needs the host's loaded project over the reverse channel); the
+            kind/verb capabilities also serve out-of-process.
+        plugin:
+            source: github.com/opencharly/plugin-task/candy/plugin-task
+            providers:
+                - kind:task
+                - command:task
+                - verb:task
+            primary:
+                task: task
+        plan:
+            - check: the task plugin ships a buildable Go module (go.mod + the provider package) compiled into charly; its kind:task decode + command:task CLI + verb:task step are exercised by the check-task-* beds and by every repo whose charly.yml declares tasks
+              id: task-module-present
+              context:
+                - build
+              command: "true"
