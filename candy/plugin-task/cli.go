@@ -11,6 +11,7 @@ import (
 	"github.com/opencharly/plugin-task/candy/plugin-task/params"
 	"github.com/opencharly/sdk"
 	pb "github.com/opencharly/spec/proto"
+	"github.com/opencharly/spec/spec"
 )
 
 // cli.go — the command:task grammar:
@@ -247,13 +248,19 @@ func invokeOpRun(ctx context.Context, req *pb.InvokeRequest) (*pb.InvokeReply, e
 		}
 		return &pb.InvokeReply{}, nil
 	}
-	// verb:task step — decode the typed plugin_input and run the named task.
-	var in params.TaskInput
+	// verb:task step — the params carry the desugared Op, whose plugin_input holds
+	// the typed #TaskInput. Extract that nested object (the sibling plugin-pipeline
+	// verb does the same) and run the named task, returning a spec.CheckResult the
+	// plan harness decodes (an empty reply is not a valid verdict).
+	var opEnv struct {
+		PluginInput params.TaskInput `json:"plugin_input"`
+	}
 	if len(req.GetParamsJson()) > 0 {
-		if jerr := json.Unmarshal(req.GetParamsJson(), &in); jerr != nil {
+		if jerr := json.Unmarshal(req.GetParamsJson(), &opEnv); jerr != nil {
 			return nil, fmt.Errorf("plugin-task: decode verb input: %w", jerr)
 		}
 	}
+	in := opEnv.PluginInput
 	ts, lerr := loadTaskSet(ctx, ex)
 	if lerr != nil {
 		return nil, lerr
@@ -267,22 +274,42 @@ func invokeOpRun(ctx context.Context, req *pb.InvokeRequest) (*pb.InvokeReply, e
 	}
 	order, cerr := ts.closure([]string{in.Task})
 	if cerr != nil {
-		return nil, cerr
+		return verbResult(spec.StatusFail, cerr.Error())
 	}
+	ran, failed := 0, 0
 	for _, n := range order {
 		resolved, perr := resolveParams(ts.tasks[n], cli)
 		if perr != nil {
-			return nil, fmt.Errorf("task %q: %w", n, perr)
+			return verbResult(spec.StatusFail, fmt.Sprintf("task %q: %v", n, perr))
 		}
 		r, rerr := runTask(ctx, ex, ts, n, resolved, false, false)
 		if rerr != nil {
-			return nil, rerr
+			return verbResult(spec.StatusFail, rerr.Error())
 		}
-		if r.Status == "error" || (r.Status == "ran" && r.Failed > 0 && !r.ContinueOnError) {
-			return nil, fmt.Errorf("task %q failed: %s", n, r.Message)
+		ran++
+		failed += r.Failed
+		if r.Status == "error" {
+			return verbResult(spec.StatusFail, fmt.Sprintf("task %q: %s", n, r.Message))
+		}
+		if r.Status == "ran" && r.Failed > 0 && !r.ContinueOnError {
+			return verbResult(spec.StatusFail, fmt.Sprintf("task %q failed (%s)", n, r.Message))
 		}
 	}
-	return &pb.InvokeReply{}, nil
+	return verbResult(spec.StatusPass, fmt.Sprintf("ran %d task(s), %d step(s) failed", ran, failed))
+}
+
+// verbResult marshals a verb verdict as the reply the plan harness decodes. The wire
+// shape carries `status` as the lowercase verdict WORD ("pass"/"fail"/"skip"), matching
+// pluginCheckResult on the decode side (a numeric enum fails to unmarshal).
+func verbResult(status spec.Status, msg string) (*pb.InvokeReply, error) {
+	b, err := json.Marshal(struct {
+		Status  string `json:"status"`
+		Message string `json:"message,omitempty"`
+	}{Status: status.String(), Message: msg})
+	if err != nil {
+		return nil, err
+	}
+	return &pb.InvokeReply{ResultJson: b}, nil
 }
 
 func firstLine(s string) string {
