@@ -272,3 +272,103 @@ func TestRequireVersion(t *testing.T) {
 		t.Fatalf("single-line absent = %q, want empty", v)
 	}
 }
+
+// TestGitSubmodules_BumpOrder pins the LOAD-BEARING bump order with REAL submodules:
+// the pinned_from repo (`src`) is itself a ROLLING submodule, STALE in the umbrella,
+// and its `inner` gitlink ADVANCES during the bump. The pin_map entry (`target`) must
+// then be pinned from src's NEW gitlink. The reverse order pins target from src's
+// OLD gitlink then advances src, leaving policy B violated.
+func TestGitSubmodules_BumpOrder(t *testing.T) {
+	base := t.TempDir()
+	mustGit := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	initRepo := func(dir string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		mustGit(dir, "init", "-q", "-b", "main")
+	}
+	commitFile := func(dir, name, content string) {
+		t.Helper()
+		writeFile(t, filepath.Join(dir, name), content)
+		mustGit(dir, "add", name)
+		mustGit(dir, "commit", "-qm", name)
+	}
+	stageGitlink := func(dir, path, sha, msg string) {
+		t.Helper()
+		cmd := exec.Command("git", "-C", dir, "update-index", "--add", "--cacheinfo", "160000,"+sha+","+path)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("update-index in %s: %v\n%s", dir, err, out)
+		}
+		mustGit(dir, "commit", "-qm", msg)
+	}
+
+	// leaf: two REAL commits L1, L2 (target is switched between them).
+	leaf := filepath.Join(base, "leaf")
+	initRepo(leaf)
+	commitFile(leaf, "leaf.txt", "L1")
+	L1 := mustGit(leaf, "rev-parse", "HEAD")
+	commitFile(leaf, "leaf.txt", "L2")
+	L2 := mustGit(leaf, "rev-parse", "HEAD")
+
+	// src-origin: its `inner` gitlink names L1 then L2 (synthetic gitlinks — only ever
+	// READ via ls-tree, never switched).
+	srcOrigin := filepath.Join(base, "src-origin")
+	initRepo(srcOrigin)
+	writeFile(t, filepath.Join(srcOrigin, ".gitmodules"),
+		"[submodule \"inner\"]\n\tpath = inner\n\turl = "+leaf+"\n\tbranch = main\n")
+	mustGit(srcOrigin, "add", ".gitmodules")
+	mustGit(srcOrigin, "commit", "-qm", "gitmodules")
+	stageGitlink(srcOrigin, "inner", L1, "inner=L1")
+	A := mustGit(srcOrigin, "rev-parse", "HEAD")
+	stageGitlink(srcOrigin, "inner", L2, "inner=L2")
+	B := mustGit(srcOrigin, "rev-parse", "HEAD")
+	srcBare := filepath.Join(base, "src.git")
+	mustGit(base, "clone", "-q", "--bare", srcOrigin, srcBare)
+	// src checkout at B (the post-roll state bump will reach).
+	src := filepath.Join(base, "src")
+	mustGit(base, "clone", "-q", srcBare, src)
+	mustGit(src, "checkout", "-q", B)
+
+	// umbrella: real submodules src (STALE at A) and target (real, STALE at L1).
+	umb := filepath.Join(base, "umb")
+	initRepo(umb)
+	commitFile(umb, "u.txt", "u")
+	mustGit(umb, "-c", "protocol.file.allow=always", "submodule", "add", "-q", srcBare, "src")
+	mustGit(umb, "-c", "protocol.file.allow=always", "submodule", "add", "-q", leaf, "target")
+	mustGit(umb, "config", "-f", ".gitmodules", "submodule.src.branch", "main")
+	mustGit(umb, "config", "-f", ".gitmodules", "submodule.target.branch", "main")
+	mustGit(umb, "add", ".gitmodules")
+	mustGit(umb, "commit", "-qm", "branch=main")
+	mustGit(umb, "update-index", "--add", "--cacheinfo", "160000,"+A+",src")
+	mustGit(umb, "update-index", "--add", "--cacheinfo", "160000,"+L1+",target")
+	mustGit(umb, "commit", "-qm", "stale pins")
+	mustGit(umb, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "src", "target")
+
+	in := map[string]any{
+		"mode": "bump", "pinned_from": "src", "pin_map": map[string]any{"target": "inner"},
+	}
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", in)
+	if st != spec.StatusPass {
+		t.Fatalf("bump: %s: %s", st, msg)
+	}
+	if got := gitlink(umb, "src"); got != B {
+		t.Fatalf("src did not roll: got %s want %s", got, B)
+	}
+	got := gitlink(umb, "target")
+	if got != L2 {
+		t.Fatalf("target pinned to %s, want L2=%s (L1=%s means it read stale src)", got, L2, L1)
+	}
+}

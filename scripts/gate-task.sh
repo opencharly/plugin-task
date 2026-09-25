@@ -100,6 +100,39 @@ done
 # Check out the umb submodule so `bump` can git-switch it.
 (cd "$FIX/umb" && git -c protocol.file.allow=always submodule update --init -q target)
 
+# --- bump-order fixture: `src` is ITSELF a rolling submodule of `umb2`, stale, and
+# its `inner` gitlink advances during the bump. `target2` must be pinned from src's
+# NEW gitlink. A wrong order would pin target2 from src's OLD gitlink and then
+# advance src, violating policy B.
+(
+  cd "$FIX" && git init -q -b main leaf && cd leaf
+  echo L1 > l && git add -A && G commit -qm L1; L1="$(git rev-parse HEAD)"
+  echo L2 > l && G commit -qam L2; L2="$(git rev-parse HEAD)"
+  printf 'L1=%s\nL2=%s\n' "$L1" "$L2" > "$FIX/leafshas"
+  cd "$FIX" && git init -q -b main srcorigin && cd srcorigin
+  echo seed > s && git add -A && G commit -qm seed
+  printf '[submodule "inner"]\n\tpath = inner\n\turl = %s\n' "$FIX/leaf" > .gitmodules
+  git add .gitmodules && G commit -qm gm
+  . "$FIX/leafshas"
+  git update-index --add --cacheinfo "160000,$L1,inner" && G commit -qm "inner=L1"; A="$(git rev-parse HEAD)"
+  git update-index --add --cacheinfo "160000,$L2,inner" && G commit -qm "inner=L2"; B="$(git rev-parse HEAD)"
+  printf 'A=%s\nB=%s\n' "$A" "$B" > "$FIX/order"
+  cd "$FIX" && git clone -q --bare srcorigin srcorigin.git
+)
+mkdir -p "$FIX/umb2"; cd "$FIX/umb2"; git init -q -b main
+echo u2 > u && git add -A && G commit -qm u
+git -c protocol.file.allow=always submodule add -q "$FIX/srcorigin.git" src
+git -c protocol.file.allow=always submodule add -q "$FIX/leaf" target2
+G commit -qm subs
+. "$FIX/order"; . "$FIX/leafshas"
+git update-index --add --cacheinfo "160000,$A,src"
+git update-index --add --cacheinfo "160000,$L1,target2"
+G commit -qm "stale pins"
+git config -f .gitmodules submodule.src.branch main
+git config -f .gitmodules submodule.target2.branch main
+git add .gitmodules && G commit -qm branches
+git -c protocol.file.allow=always submodule update --init -q src target2
+
 cat > "$FIX/umb/charly.yml" <<'YML'
 version: 2026.261.1747
 pins-verify:
@@ -168,6 +201,20 @@ missing-pin:
         context: [runtime]
 YML
 
+# A second project exercising the LOAD-BEARING bump order (pinned_from is itself a
+# rolling stale submodule).
+cat > "$FIX/umb2/charly.yml" <<'YML'
+version: 2026.261.1747
+order-bump:
+  task:
+    description: bump target2 from src (which itself rolls first)
+    dir: .
+    plan:
+      - run: bump
+        git-submodules: {mode: bump, pinned_from: src, pin_map: {target2: inner}}
+        context: [deploy]
+YML
+
 cd "$FIX/umb"
 cp r r.copy
 printf 'head\nBEGIN-X\nold\nEND-X\ntail\n' > TARGET
@@ -193,6 +240,14 @@ verify_out="$("$CH" task pins-verify)"; echo "$verify_out" | grep -q '0 failed' 
 
 echo "== verb:git-submodules verify (missing twin -> must FAIL loudly, never vacuous) =="
 if "$CH" task missing-pin; then echo "FAIL: a missing gitlink must fail verify" >&2; exit 1; fi
+
+echo "== verb:git-submodules bump ORDER (pinned_from is itself rolled first) =="
+. "$FIX/order"; . "$FIX/leafshas"
+(cd "$FIX/umb2" && "$CH" task order-bump) | grep -q '0 failed' || { echo "FAIL: order-bump did not run" >&2; exit 1; }
+src_got="$(git -C "$FIX/umb2" ls-files -s src | awk '{print $2}')"
+tgt_got="$(git -C "$FIX/umb2" ls-files -s target2 | awk '{print $2}')"
+[ "$src_got" = "$B" ] || { echo "FAIL: src did not roll to $B (got $src_got)" >&2; exit 1; }
+[ "$tgt_got" = "$L2" ] || { echo "FAIL: target2 pinned to $tgt_got, want L2=$L2 (L1=$L1 means stale src read)" >&2; exit 1; }
 
 echo "== verb:file-parity (identical must PASS, drift must FAIL) =="
 par_out="$("$CH" task parity)"; echo "$par_out" | grep -q '0 failed' || { echo "FAIL: identical pair must pass" >&2; exit 1; }
