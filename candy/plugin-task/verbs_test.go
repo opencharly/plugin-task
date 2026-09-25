@@ -62,47 +62,45 @@ func TestGitSubmodules_Status(t *testing.T) {
 }
 
 // TestGitSubmodules_VerifyPolicyB proves the policy-B comparison passes when the
-// umbrella gitlink equals the pinned repo's twin, and fails on a drifted pin. It
-// uses a real gitlink written through `git update-index --cacheinfo` (no nested
-// submodule clone needed).
+// umbrella gitlink equals the pinned repo's twin, and fails when the twin is
+// MISSING (never a vacuous empty==empty pass). It uses a real gitlink written
+// through `git update-index --cacheinfo` (no nested submodule clone needed).
 func TestGitSubmodules_VerifyPolicyB(t *testing.T) {
 	dir := t.TempDir()
 	run := gitRepo(t, dir)
-	// A commit to point the pinned repo's `inner` path at.
-	inner := strings.Repeat("a", 40)
-	// Write the pinned repo's gitlink for path `inner` into a tree object, then
-	// commit; do the same for the umbrella's `target`.
-	writeG := func(path, sha string) {
+	sha := strings.Repeat("a", 40)
+	writeG := func(path, s string) {
 		cmd := exec.Command("git", "-C", dir, "update-index", "--add", "--cacheinfo",
-			"160000,"+sha+","+path)
+			"160000,"+s+","+path)
 		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("update-index %s: %v\n%s", path, err, out)
 		}
 	}
 	writeFile(t, filepath.Join(dir, ".gitmodules"),
-		"[submodule \"target\"]\n\tpath = target\n\turl = u\n\tbranch = main\n"+
-			"[submodule \"src\"]\n\tpath = src\n\turl = u\n\tbranch = main\n")
-	// `src` is a nested checkout whose OWN gitlink at `inner` we synthesize by
-	// creating src/.git-free dir + a standalone commit is overkill; instead treat
-	// `src` as the pinned checkout and give it a gitlink via a second tree.
-	//
-	// Simplest faithful fixture: make `src` its own git repo committed with a
-	// gitlink at `inner`, and the umbrella carry a gitlink at `target`.
-	writeG("target", inner)
-	writeG("src", inner)
-	run("add", "-A")
+		"[submodule \"target\"]\n\tpath = target\n\turl = u\n\tbranch = main\n")
+	// Stage .gitmodules, then write the gitlink LAST: a plain `git add -A` after
+	// update-index would stage the gitlink's "deletion" (there is no worktree dir).
+	run("add", ".gitmodules")
+	// The umbrella carries a gitlink at `target`; the pinned checkout (this same
+	// repo, ".") carries the SAME gitlink at `target` so policy B holds.
+	writeG("target", sha)
 	run("commit", "-qm", "parent")
 
-	// The pinned_from == this same repo (src's tree at HEAD) so the twin at `inner`
-	// does not exist -> verify must fail (no gitlink for `inner`). This proves the
-	// comparison is real rather than vacuous.
-	in := map[string]any{
-		"mode": "verify", "pinned_from": ".", "pin_map": map[string]any{"target": "inner"},
+	// PASS: pin_map target -> target resolves to the identical gitlink in pinned ".".
+	st, msg := runMaintenanceVerbIn(dir, "git-submodules", map[string]any{
+		"mode": "verify", "pinned_from": ".", "pin_map": map[string]any{"target": "target"},
+	})
+	if st != spec.StatusPass {
+		t.Fatalf("matching gitlinks must pass policy B, got %s: %s", st, msg)
 	}
-	st, msg := runMaintenanceVerbIn(dir, "git-submodules", in)
+
+	// FAIL: a pinned path with NO gitlink must fail loudly (never vacuous).
+	st, msg = runMaintenanceVerbIn(dir, "git-submodules", map[string]any{
+		"mode": "verify", "pinned_from": ".", "pin_map": map[string]any{"target": "absent/twin"},
+	})
 	if st != spec.StatusFail {
-		t.Fatalf("verify against a missing twin must fail, got %s: %s", st, msg)
+		t.Fatalf("a missing twin gitlink must fail, got %s: %s", st, msg)
 	}
 }
 

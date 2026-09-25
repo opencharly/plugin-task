@@ -409,13 +409,24 @@ func runModulePins(projDir string, in params.ModulePinsInput) (spec.Status, stri
 		}
 		want[key] = ver
 	}
-	// Resolve the glob against the project dir (module directories).
+	// Resolve the glob against the project dir (module directories). A module is in
+	// the lockstep set only if it requires at least ONE of the keys — a module with
+	// no key require has nothing to keep in step and is skipped (the same contract
+	// the former mods:tidy sweep used).
 	matches, _ := filepath.Glob(filepath.Join(projDir, in.Glob))
 	var modules []string
 	for _, m := range matches {
-		if fi, err := os.Stat(filepath.Join(m, "go.mod")); err == nil && !fi.IsDir() {
-			modules = append(modules, m)
+		if fi, err := os.Stat(filepath.Join(m, "go.mod")); err != nil || fi.IsDir() {
+			continue
 		}
+		gm, err := os.ReadFile(filepath.Join(m, "go.mod"))
+		if err != nil {
+			continue
+		}
+		if !requiresAny(string(gm), in.Keys) {
+			continue
+		}
+		modules = append(modules, m)
 	}
 	sort.Strings(modules)
 	mode := in.Mode
@@ -455,6 +466,16 @@ func runModulePins(projDir string, in params.ModulePinsInput) (spec.Status, stri
 		edited++
 	}
 	return spec.StatusPass, fmt.Sprintf("aligned and tidied %d module(s)", edited)
+}
+
+// requiresAny reports whether a go.mod's require list names any of the keys.
+func requiresAny(gomod string, keys []string) bool {
+	for _, k := range keys {
+		if requireVersion(gomod, k) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // requireVersion returns the version pinned for module in a go.mod's require list,

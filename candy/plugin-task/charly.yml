@@ -47,8 +47,8 @@ plugin-task:
               context:
                 - build
               command: "test -f plugin.go && test -f schema/task.cue && test -f params/cue_types_gen.go && echo 'plugin.go schema/task.cue params/cue_types_gen.go all present'"
-            - check: the provider source declares all seven capabilities (task kind/command/verb + the four maintenance verbs) — a deterministic probe that fails if a capability is dropped
+            - check: the provider source declares all seven capabilities (the three task classes individually + the four maintenance verbs) — a deterministic probe that fails if a capability is dropped
               id: task-capabilities-declared
               context:
                 - build
-              command: "grep -q 'Word: \"task\"' plugin.go && grep -q 'Word: \"git-submodules\"' plugin.go && grep -q 'Word: \"file-parity\"' plugin.go && grep -q 'Word: \"splice-region\"' plugin.go && grep -q 'Word: \"module-pins\"' plugin.go && echo 'kind/command/verb:task + four maintenance verbs declared'"
+              command: "grep -q 'Class: \"kind\", Word: \"task\"' plugin.go && grep -q 'Class: \"command\", Word: \"task\"' plugin.go && grep -q 'Class: \"verb\", Word: \"task\"' plugin.go && grep -q 'Word: \"git-submodules\"' plugin.go && grep -q 'Word: \"file-parity\"' plugin.go && grep -q 'Word: \"splice-region\"' plugin.go && grep -q 'Word: \"module-pins\"' plugin.go && echo 'kind/command/verb:task + four maintenance verbs declared'"

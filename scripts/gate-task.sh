@@ -142,6 +142,22 @@ mods:
       - run: adopt and tidy
         module-pins: {source_go_mod: core/go.mod, glob: "tools/*", keys: [github.com/opencharly/sdk]}
         context: [deploy]
+mods-check:
+  task:
+    description: assert the source pins hold under tools/*
+    dir: .
+    plan:
+      - check: the pins hold
+        module-pins: {mode: check, source_go_mod: core/go.mod, glob: "tools/*", keys: [github.com/opencharly/sdk]}
+        context: [runtime]
+missing-pin:
+  task:
+    description: verify against a pinned path with no gitlink (must fail loudly)
+    dir: .
+    plan:
+      - check: the missing twin fails
+        git-submodules: {mode: verify, pinned_from: ../src, pin_map: {target: nope/absent}}
+        context: [runtime]
 YML
 
 cd "$FIX/umb"
@@ -167,6 +183,9 @@ got="$(git ls-files -s target | awk '{print $2}')"
 echo "== verb:git-submodules verify (now current -> must PASS) =="
 verify_out="$("$CH" task pins-verify)"; echo "$verify_out" | grep -q '0 failed' || { echo "FAIL: verify must pass after bump" >&2; exit 1; }
 
+echo "== verb:git-submodules verify (missing twin -> must FAIL loudly, never vacuous) =="
+if "$CH" task missing-pin; then echo "FAIL: a missing gitlink must fail verify" >&2; exit 1; fi
+
 echo "== verb:file-parity (identical must PASS, drift must FAIL) =="
 par_out="$("$CH" task parity)"; echo "$par_out" | grep -q '0 failed' || { echo "FAIL: identical pair must pass" >&2; exit 1; }
 echo drifted >> r.copy
@@ -178,8 +197,10 @@ spl_out="$("$CH" task splice)"; echo "$spl_out" | grep -q '0 failed' || { echo "
 grep -q 'new' TARGET || { echo "FAIL: splice did not apply the fragment region" >&2; exit 1; }
 if grep -q 'old' TARGET; then echo "FAIL: splice left the stale region" >&2; exit 1; fi
 
-echo "== verb:module-pins (must adopt the source pin) =="
+echo "== verb:module-pins (stale -> must FAIL, adopt -> must PASS) =="
+if "$CH" task mods-check; then echo "FAIL: stale pins must fail module-pins check" >&2; exit 1; fi
 mods_out="$("$CH" task mods)"; echo "$mods_out" | grep -q '0 failed' || { echo "FAIL: module-pins did not run" >&2; exit 1; }
 grep -q 'github.com/opencharly/sdk v1.2.3' tools/m1/go.mod || { echo "FAIL: module-pins did not adopt the pin" >&2; exit 1; }
+mods2_out="$("$CH" task mods-check)"; echo "$mods2_out" | grep -q '0 failed' || { echo "FAIL: module-pins check must pass after adopt" >&2; exit 1; }
 
 echo "gate-task: PASS — command:task + all four maintenance verbs executed live against charly $CHARLY_TAG"
