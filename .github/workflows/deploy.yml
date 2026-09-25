@@ -4,10 +4,10 @@
 # plugin-task's command:task is compiled-in-only (it needs the host's loaded
 # project over the reverse channel), so a bare `charly box validate` against an
 # out-of-process plugin proves only the manifest. This gate builds a real charly
-# with candy/plugin-task compiled IN and drives `charly task` end to end —
-# `scripts/gate-task.sh`. The charly checkout is pinned to v2026.267.1938, the
-# tag carrying the host-value-gated kind seam (#TaskValue → spec.KindValueDefs +
-# foldHostValueGatedKind) this plugin's kind:task needs.
+# with candy/plugin-task compiled IN (a local `-replace` points it at THIS working
+# tree) and drives `charly task` plus all four maintenance verbs end to end —
+# `scripts/gate-task.sh`. The charly checkout is pinned to v2026.267.2313, the tag
+# that compiles candy/plugin-task into the binary.
 name: candy
 
 on:
@@ -27,7 +27,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      CHARLY_TAG: v2026.267.1938
+      CHARLY_TAG: v2026.267.2313
     steps:
       - uses: actions/checkout@v7
 
@@ -36,17 +36,11 @@ jobs:
           go-version-file: candy/plugin-task/go.mod
           cache-dependency-path: candy/plugin-task/go.sum
 
-      - name: Fetch the pinned charly source (CI-time temp checkout)
+      - name: The candy manifest validates at the pinned charly (out-of-process)
         run: |
           git clone --depth 1 --branch "$CHARLY_TAG" https://github.com/opencharly/charly.git /tmp/charly
+          ( cd /tmp/charly/charly && go build -buildvcs=false -ldflags "-X main.BuildCalVer=candy-ci" -o /tmp/charly/bin/charly . )
+          /tmp/charly/bin/charly box validate
 
-      - name: Build the pinned charly binary
-        run: |
-          mkdir -p /tmp/charly/bin
-          cd /tmp/charly/charly && go build -buildvcs=false -ldflags "-X main.BuildCalVer=candy-ci" -o /tmp/charly/bin/charly .
-
-      - name: The candy manifest validates at the pinned charly
-        run: /tmp/charly/bin/charly box validate
-
-      - name: The compiled-in command:task path executes live (R10 gate)
+      - name: command:task + the four maintenance verbs execute live (R10 gate)
         run: bash scripts/gate-task.sh
