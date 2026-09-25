@@ -12,3 +12,69 @@ type TaskInput struct {
 	// params are NAME=VALUE overrides for the task's declared params.
 	Param []string `json:"param,omitempty"`
 }
+
+// #GitSubmodulesInput drives `.gitmodules` pin maintenance.
+type GitSubmodulesInput struct {
+	// mode: status lists; bump stages new gitlinks; verify asserts.
+	Mode string `json:"mode"`
+
+	// pinned_from is a checkout path whose gitlinks are authoritative for the
+	// entries named in pin_map (e.g. "charly"). Empty => no pinned set.
+	PinnedFrom string `json:"pinned_from,omitempty"`
+
+	// pin_map maps a submodule PATH in this repo to its twin PATH in pinned_from.
+	// On bump, every submodule NOT in pin_map rolls to its own default-branch HEAD.
+	PinMap map[string]string `json:"pin_map,omitempty"`
+
+	// skip lists submodule paths the verb must not touch.
+	Skip []string `json:"skip,omitempty"`
+}
+
+// #FileParityInput asserts (or syncs) that paired files are byte-identical.
+type FileParityInput struct {
+	// mode: check fails on any drift; sync copies left -> right.
+	Mode string `json:"mode,omitempty"`
+
+	// pairs are the compared file pairs, left = source of truth.
+	Pairs []FileParityPair `json:"pairs"`
+}
+
+type FileParityPair struct {
+	Left string `json:"left"`
+
+	Right string `json:"right"`
+}
+
+// #SpliceRegionInput splices a marked region from a fragment into a target file.
+type SpliceRegionInput struct {
+	// mode: sync writes; check exits non-zero on a stale target.
+	Mode string `json:"mode,omitempty"`
+
+	// target is the file whose marked region is replaced.
+	Target string `json:"target"`
+
+	// fragment is the file carrying the source region (must carry the markers).
+	Fragment string `json:"fragment"`
+
+	// begin / end are the region marker strings (a line containing begin starts the
+	// region; a line containing end closes it), matched with the fragment's own copy.
+	Begin string `json:"begin"`
+
+	End string `json:"end"`
+}
+
+// #ModulePinsInput adopts a set of module pins from a source go.mod into every
+// module a glob matches, then tidies.
+type ModulePinsInput struct {
+	// mode: sync edits+tidies; check only asserts.
+	Mode string `json:"mode,omitempty"`
+
+	// source_go_mod is the go.mod whose require pins are the source of truth.
+	SourceGoMod string `json:"source_go_mod"`
+
+	// glob is the directory glob (relative to the working dir) selecting modules.
+	Glob string `json:"glob"`
+
+	// keys are the module paths whose pins are adopted (e.g. sdk, spec).
+	Keys []string `json:"keys"`
+}

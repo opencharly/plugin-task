@@ -13,6 +13,77 @@ compiled into charly.
 | `kind:task` | a `task:` node in `charly.yml` | a named, reusable plan using the same `#Step`/`#Op` grammar a candy's `plan:` uses |
 | `command:task` | `charly task [list] [<name>] …` | run a task (and its `depends_on` closure) on the host |
 | `verb:task` | `task:` verb step in a plan | compose a declared task into a candy/box/task plan |
+| `verb:git-submodules` | `git-submodules:` verb step | status / bump / verify `.gitmodules` pins (incl. the policy-B comparison of a repo's pins against a pinned checkout's gitlinks) |
+| `verb:file-parity` | `file-parity:` verb step | check / sync that paired files are byte-identical |
+| `verb:splice-region` | `splice-region:` verb step | splice a marked region from a fragment into a target |
+| `verb:module-pins` | `module-pins:` verb step | adopt a source go.mod's require pins across every module a glob matches, then tidy |
+
+## Generic maintenance verbs
+
+The four maintenance verbs replace repository shell scripts. Each is **domain-neutral**
+and parameterized by the repo's OWN data (paths, pairs, pins) carried in its authored
+input, so the plugin stays reusable by any repository — no org name, repo name, or
+distro list is baked in. They are host-native: like the task engine they act on the
+repository checkout the charly process runs in.
+
+```yaml
+# Bump every submodule pin per policy B (distro-* pins == charly's gitlinks;
+# everything else rolls to its own default-branch HEAD).
+sync:
+  task:
+    description: Bump all submodule pins per policy B
+    plan:
+      - run: bump the pins
+        git-submodules:
+          mode: bump
+          pinned_from: charly
+          pin_map:
+            box/arch: box/arch
+            box/fedora: box/fedora
+        context: [deploy]
+
+# Assert the harness config files are identical to charly's twins.
+harness:
+  task:
+    description: Check harness config parity
+    plan:
+      - check: the shared harness files are identical
+        file-parity:
+          pairs:
+            - {left: .claude/hooks/pre-commit-gate.sh, right: charly/.claude/hooks/pre-commit-gate.sh}
+        context: [runtime]
+
+# Splice the generated skill dispatcher into AGENTS.md.
+skills:
+  task:
+    description: Splice the generated R0 dispatcher into AGENTS.md
+    plan:
+      - run: splice the dispatcher region
+        splice-region:
+          target: AGENTS.md
+          fragment: marketplace/DISPATCHER.md
+          begin: "<!-- BEGIN GENERATED SKILL DISPATCHER -->"
+          end: "<!-- END GENERATED SKILL DISPATCHER -->"
+        context: [deploy]
+
+# Adopt the shared sdk/spec pins across every tools/* module.
+mods-tidy:
+  task:
+    description: Adopt the shared sdk/spec pins, then tidy
+    plan:
+      - run: adopt and tidy
+        module-pins:
+          source_go_mod: charly/go.mod
+          glob: tools/*
+          keys: [github.com/opencharly/sdk, github.com/opencharly/spec]
+        context: [deploy]
+```
+
+Each verb's input is validated against its `#<Name>Input` CUE def at load; the handler
+returns a `pass`/`fail`/`skip` verdict the plan harness decodes. A `git-submodules
+verify` FAILS LOUDLY on a missing gitlink on either side (never a vacuous empty==empty
+pass); `module-pins check` reports every stale module.
+
 
 ## Authoring a task
 
