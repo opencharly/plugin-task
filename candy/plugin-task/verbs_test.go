@@ -251,16 +251,24 @@ func TestModulePins_MissingSourceKeyFails(t *testing.T) {
 	}
 }
 
-// TestRequireVersion proves the go.mod require reader.
+// TestRequireVersion proves the go.mod require reader handles BOTH the block form
+// and the single-line `require M vX` form (the form the live gate's fixtures use).
 func TestRequireVersion(t *testing.T) {
-	gm := "module x\n\ngo 1.26\n\nrequire (\n\tgithub.com/opencharly/sdk v1.2.3\n\tgithub.com/opencharly/spec v4.5.6\n)\n"
-	if v := requireVersion(gm, "github.com/opencharly/sdk"); v != "v1.2.3" {
-		t.Fatalf("sdk = %q", v)
+	block := "module x\n\ngo 1.26\n\nrequire (\n\tgithub.com/opencharly/sdk v1.2.3\n\tgithub.com/opencharly/spec v4.5.6\n)\n"
+	if v := requireVersion(block, "github.com/opencharly/sdk"); v != "v1.2.3" {
+		t.Fatalf("block sdk = %q", v)
 	}
-	if v := requireVersion(gm, "github.com/opencharly/spec"); v != "v4.5.6" {
-		t.Fatalf("spec = %q", v)
+	if v := requireVersion(block, "github.com/opencharly/spec"); v != "v4.5.6" {
+		t.Fatalf("block spec = %q", v)
 	}
-	if v := requireVersion(gm, "github.com/absent"); v != "" {
-		t.Fatalf("absent = %q, want empty", v)
+	if v := requireVersion(block, "github.com/absent"); v != "" {
+		t.Fatalf("block absent = %q, want empty", v)
+	}
+	single := "module x\n\ngo 1.26\n\nrequire github.com/opencharly/sdk v1.2.3\n"
+	if v := requireVersion(single, "github.com/opencharly/sdk"); v != "v1.2.3" {
+		t.Fatalf("single-line sdk = %q", v)
+	}
+	if v := requireVersion(single, "github.com/absent"); v != "" {
+		t.Fatalf("single-line absent = %q, want empty", v)
 	}
 }
