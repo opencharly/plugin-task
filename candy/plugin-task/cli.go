@@ -192,9 +192,28 @@ func printResultText(r *runResult) {
 			return
 		}
 		for _, s := range r.Steps {
-			fmt.Fprintf(outWriter(), "  [%s] %s — %s\n", s.Result.Status.String(), s.Keyword, firstLine(s.Text))
+			fmt.Fprintln(outWriter(), formatStepLine(s))
 		}
 	}
+}
+
+// formatStepLine renders ONE step line for text mode. The step's authored `Text`
+// alone is not the whole result: a step's `Result.Message` carries the VERB's own
+// output — a FAIL's diagnostic (`exit=2, want 0 (stderr: …)`) AND a passing verb's
+// payload (verb:git-submodules prints its `PATH BRANCH PIN` table or its
+// `bumped N …` summary there; verb:command reports `exit=N`). The reporter used to
+// print only `firstLine(Text)`, so a passing step's output was discarded and a
+// failing step's cause was INVISIBLE — `charly task map` printed no map, and a real
+// failure (`unable to create index.lock`) reported only `[fail] run — …` with no
+// reason. Multi-line messages are indented, never truncated to one line, so a verb's
+// table survives verbatim. This mirrors the check engine's report.renderStep, which
+// already emits step.Result.Message for every step.
+func formatStepLine(s spec.StepResult) string {
+	line := fmt.Sprintf("  [%s] %s — %s", s.Result.Status.String(), s.Keyword, firstLine(s.Text))
+	if msg := strings.TrimRight(s.Result.Message, "\n"); msg != "" {
+		line += "\n      " + strings.ReplaceAll(msg, "\n", "\n      ")
+	}
+	return line
 }
 
 func printResultsJSON(results []*runResult) error {

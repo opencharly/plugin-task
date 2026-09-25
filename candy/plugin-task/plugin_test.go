@@ -3,8 +3,10 @@ package task
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/opencharly/sdk"
@@ -344,5 +346,65 @@ func TestRunTask_TalliesFailure(t *testing.T) {
 	}
 	if res.Failed != 1 {
 		t.Fatalf("failed step not tallied: %+v", res)
+	}
+}
+
+// TestFormatStepLine_RendersStepMessage proves a step's Result.Message reaches the
+// text output. That message is the ONLY carrier of a verb's own output: the
+// `git-submodules` verb's `PATH BRANCH PIN` table (status) and `bumped N …` summary
+// (bump) ride there, a FAIL's diagnostic (`exit=2, want 0 (stderr: …)`) rides there,
+// and verb:command reports its exit there. The reporter printed only the authored
+// Text, so `charly task map` printed no map and a real failure (`index.lock exists`)
+// showed no reason. This test FAILS on that behaviour.
+func TestFormatStepLine_RendersStepMessage(t *testing.T) {
+	// A PASS with a multi-line payload (the git-submodules status table shape).
+	table := "PATH                         BRANCH     PIN\ncharly                       main       4f9c868b"
+	got := formatStepLine(spec.StepResult{
+		Keyword: "run", Text: "print the submodule map",
+		Result: spec.CheckResult{Status: spec.StatusPass, Message: table},
+	})
+	if !strings.Contains(got, "PATH") || !strings.Contains(got, "charly                       main") {
+		t.Fatalf("a passing step's multi-line message must be rendered verbatim, got:\n%s", got)
+	}
+	if !strings.Contains(got, "print the submodule map") {
+		t.Fatalf("the authored Text must still be rendered, got:\n%s", got)
+	}
+	// A FAIL's diagnostic must be visible (the dead-end RCA this fixes).
+	got = formatStepLine(spec.StepResult{
+		Keyword: "run", Text: "bump the pins",
+		Result: spec.CheckResult{Status: spec.StatusFail, Message: "pin x -> origin/main failed: fatal: index.lock exists"},
+	})
+	if !strings.Contains(got, "index.lock exists") {
+		t.Fatalf("a failing step's diagnostic must be rendered, got:\n%s", got)
+	}
+	// A step with no message stays a single clean line.
+	got = formatStepLine(spec.StepResult{Keyword: "check", Text: "x", Result: spec.CheckResult{Status: spec.StatusPass}})
+	if strings.Contains(got, "\n") {
+		t.Fatalf("an empty message must not add a continuation line, got:\n%s", got)
+	}
+}
+
+// TestPrintResultText_EmitsStepMessage drives the REAL reporter through stdout and
+// asserts the step message reaches it — the end-to-end arm the pure renderer test
+// cannot cover (a reporter that stopped calling the renderer would pass that one).
+func TestPrintResultText_EmitsStepMessage(t *testing.T) {
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	printResultText(&runResult{
+		Name: "map", Status: "ran",
+		Steps: []spec.StepResult{{
+			Keyword: "run", Text: "print the submodule map",
+			Result: spec.CheckResult{Status: spec.StatusPass, Message: "MAP-TABLE-MARKER"},
+		}},
+	})
+	_ = w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	if !strings.Contains(string(out), "MAP-TABLE-MARKER") {
+		t.Fatalf("printResultText must emit the step message, got:\n%s", out)
 	}
 }
