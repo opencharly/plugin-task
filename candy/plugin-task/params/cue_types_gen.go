@@ -23,11 +23,8 @@ type GitSubmodulesInput struct {
 	PinnedFrom string `json:"pinned_from,omitempty"`
 
 	// pin_map maps a submodule PATH in this repo to its twin PATH in pinned_from.
+	// On bump, every submodule NOT in pin_map rolls to its own default-branch HEAD.
 	PinMap map[string]string `json:"pin_map,omitempty"`
-
-	// rolling lists submodule paths that track their OWN default-branch HEAD
-	// (every submodule not in pin_map is rolling by default).
-	Rolling []string `json:"rolling,omitempty"`
 
 	// skip lists submodule paths the verb must not touch.
 	Skip []string `json:"skip,omitempty"`

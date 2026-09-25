@@ -345,12 +345,13 @@ func runSpliceRegion(projDir string, in params.SpliceRegionInput) (spec.Status, 
 	return spec.StatusPass, fmt.Sprintf("splice-region: %s updated", in.Target)
 }
 
-// extractRegion returns the region between the first begin-line and the next
-// end-line (inclusive), from a document.
-func extractRegion(text, begin, end string) (string, bool) {
-	lines := strings.Split(text, "\n")
-	bi, ei := -1, -1
-	for i, l := range lines {
+// markerBounds finds the line indices [bi, ei] of the region delimited by the first
+// line containing begin and the next line containing end. ok=false when either
+// marker is absent. It is the ONE marker-scanner both extractRegion and
+// spliceRegion call (R3).
+func markerBounds(text, begin, end string) (bi, ei int, ok bool) {
+	bi, ei = -1, -1
+	for i, l := range strings.Split(text, "\n") {
 		if bi == -1 && strings.Contains(l, begin) {
 			bi = i
 			continue
@@ -360,7 +361,15 @@ func extractRegion(text, begin, end string) (string, bool) {
 			break
 		}
 	}
-	if bi == -1 || ei == -1 {
+	return bi, ei, bi != -1 && ei != -1
+}
+
+// extractRegion returns the region between the first begin-line and the next
+// end-line (inclusive), from a document.
+func extractRegion(text, begin, end string) (string, bool) {
+	lines := strings.Split(text, "\n")
+	bi, ei, ok := markerBounds(text, begin, end)
+	if !ok {
 		return "", false
 	}
 	return strings.Join(lines[bi:ei+1], "\n"), true
@@ -370,18 +379,8 @@ func extractRegion(text, begin, end string) (string, bool) {
 // own markers), preserving everything outside.
 func spliceRegion(text, begin, end, region string) (string, bool) {
 	lines := strings.Split(text, "\n")
-	bi, ei := -1, -1
-	for i, l := range lines {
-		if bi == -1 && strings.Contains(l, begin) {
-			bi = i
-			continue
-		}
-		if bi != -1 && strings.Contains(l, end) {
-			ei = i
-			break
-		}
-	}
-	if bi == -1 || ei == -1 {
+	bi, ei, ok := markerBounds(text, begin, end)
+	if !ok {
 		return "", false
 	}
 	out := append([]string{}, lines[:bi]...)

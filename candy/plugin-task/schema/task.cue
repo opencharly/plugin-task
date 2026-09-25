@@ -34,10 +34,8 @@
 	// entries named in pin_map (e.g. "charly"). Empty => no pinned set.
 	pinned_from?: string @go(PinnedFrom)
 	// pin_map maps a submodule PATH in this repo to its twin PATH in pinned_from.
+	// On bump, every submodule NOT in pin_map rolls to its own default-branch HEAD.
 	pin_map?: {[string]: string} @go(PinMap)
-	// rolling lists submodule paths that track their OWN default-branch HEAD
-	// (every submodule not in pin_map is rolling by default).
-	rolling?: [...string]
 	// skip lists submodule paths the verb must not touch.
 	skip?: [...string]
 }
