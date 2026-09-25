@@ -191,22 +191,13 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		return spec.StatusPass, strings.TrimRight(b.String(), "\n")
 
 	case "bump":
+		// ORDER IS LOAD-BEARING (RDD): roll the non-pinned submodules FIRST — the
+		// pinned_from repo (e.g. "charly") is itself one of them — and only THEN read
+		// its gitlinks to pin the pin_map entries. The reverse order pins from the
+		// pinned repo's OLD HEAD and then advances it, leaving policy B violated after
+		// every sync.
 		var done []string
-		for upath, cpath := range in.PinMap {
-			if skipped[upath] {
-				continue
-			}
-			sha, _, exit := hostCapture(context.Background(), projDir,
-				fmt.Sprintf("env -u GIT_DIR -u GIT_WORK_TREE git -C %s ls-tree HEAD %s | awk '{print $3}'",
-					shellQuote(in.PinnedFrom), shellQuote(cpath)))
-			if exit != 0 || strings.TrimSpace(sha) == "" {
-				return spec.StatusFail, fmt.Sprintf("no gitlink for %q in %q", cpath, in.PinnedFrom)
-			}
-			if st, msg := pinSubmodule(projDir, upath, strings.TrimSpace(sha)); st != spec.StatusPass {
-				return st, msg
-			}
-			done = append(done, upath)
-		}
+		// Phase 1: every submodule NOT named in pin_map rolls to its default-branch HEAD.
 		for _, p := range paths {
 			if skipped[p] {
 				continue
@@ -222,6 +213,22 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 				return st, msg
 			}
 			done = append(done, p)
+		}
+		// Phase 2: pin each pin_map entry from the (now-current) pinned_from gitlinks.
+		for upath, cpath := range in.PinMap {
+			if skipped[upath] {
+				continue
+			}
+			sha, _, exit := hostCapture(context.Background(), projDir,
+				fmt.Sprintf("env -u GIT_DIR -u GIT_WORK_TREE git -C %s ls-tree HEAD %s | awk '{print $3}'",
+					shellQuote(in.PinnedFrom), shellQuote(cpath)))
+			if exit != 0 || strings.TrimSpace(sha) == "" {
+				return spec.StatusFail, fmt.Sprintf("no gitlink for %q in %q", cpath, in.PinnedFrom)
+			}
+			if st, msg := pinSubmodule(projDir, upath, strings.TrimSpace(sha)); st != spec.StatusPass {
+				return st, msg
+			}
+			done = append(done, upath)
 		}
 		sort.Strings(done)
 		return spec.StatusPass, fmt.Sprintf("bumped %d submodule pin(s): %s", len(done), strings.Join(done, ", "))
