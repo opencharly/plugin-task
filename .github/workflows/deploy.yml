@@ -39,6 +39,7 @@ jobs:
       - name: The candy manifest validates at the pinned charly (out-of-process)
         run: |
           git clone --depth 1 --branch "$CHARLY_TAG" https://github.com/opencharly/charly.git /tmp/charly
+          mkdir -p /tmp/charly/bin
           ( cd /tmp/charly/charly && go build -buildvcs=false -ldflags "-X main.BuildCalVer=candy-ci" -o /tmp/charly/bin/charly . )
           /tmp/charly/bin/charly box validate
 

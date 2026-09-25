@@ -134,6 +134,14 @@ splice:
       - run: splice
         splice-region: {target: TARGET, fragment: FRAG, begin: "BEGIN-X", end: "END-X"}
         context: [deploy]
+splice-check:
+  task:
+    description: assert the marked region is current
+    dir: .
+    plan:
+      - check: the region is current
+        splice-region: {mode: check, target: TARGET, fragment: FRAG, begin: "BEGIN-X", end: "END-X"}
+        context: [runtime]
 mods:
   task:
     description: adopt the source pins under tools/*
@@ -192,10 +200,15 @@ echo drifted >> r.copy
 if "$CH" task parity; then echo "FAIL: drifted pair must fail" >&2; exit 1; fi
 cp r r.copy
 
-echo "== verb:splice-region (must rewrite the region) =="
+echo "== verb:splice-region (stale -> check must FAIL, sync -> current) =="
+# A stale target: overwrite the region, then `check` must fail before sync fixes it.
+printf 'head\nBEGIN-X\nstale\nEND-X\ntail\n' > TARGET
+if "$CH" task splice-check; then echo "FAIL: a stale region must fail splice check" >&2; exit 1; fi
 spl_out="$("$CH" task splice)"; echo "$spl_out" | grep -q '0 failed' || { echo "FAIL: splice did not run" >&2; exit 1; }
 grep -q 'new' TARGET || { echo "FAIL: splice did not apply the fragment region" >&2; exit 1; }
 if grep -q 'old' TARGET; then echo "FAIL: splice left the stale region" >&2; exit 1; fi
+if grep -q 'stale' TARGET; then echo "FAIL: splice left the stale region" >&2; exit 1; fi
+spl2_out="$("$CH" task splice-check)"; echo "$spl2_out" | grep -q '0 failed' || { echo "FAIL: splice check must pass after sync" >&2; exit 1; }
 
 echo "== verb:module-pins (stale -> must FAIL, adopt -> must PASS) =="
 if "$CH" task mods-check; then echo "FAIL: stale pins must fail module-pins check" >&2; exit 1; fi
