@@ -1,4 +1,3 @@
-version: 2026.261.1747
 # Root project manifest — makes this repo a PROJECT so its own candy is scanned and
 # the CUE schema gate applies (`charly box validate`). It declares where to look and
 # nothing else.
