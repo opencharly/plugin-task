@@ -10,6 +10,7 @@ import (
 
 	"github.com/opencharly/plugin-task/candy/plugin-task/params"
 	"github.com/opencharly/sdk"
+	"github.com/opencharly/sdk/workflowkit"
 	pb "github.com/opencharly/spec/proto"
 	"github.com/opencharly/spec/spec"
 )
@@ -21,7 +22,7 @@ import (
 //	charly task <name> [opts]       run a task (its depends_on closure first)
 //	charly task --all [opts]        run every declared task (dependency order)
 //
-// Options: --dry-run, --json, --force, --param NAME=VALUE (repeatable).
+// Options: --dry-run, --json, --output, --force, --param NAME=VALUE (repeatable).
 
 // runTaskCLI is the single entry point both placements use (CliMain out-of-process,
 // Invoke(OpRun) compiled-in), so the command behaves identically either way.
@@ -40,11 +41,19 @@ func runTaskCLI(ctx context.Context, ex *sdk.Executor, args []string) error {
 		return printList(ts, opts.json)
 	}
 
+	// The human report goes to stdout normally. --output redirects it to stderr so
+	// stdout carries ONLY the final step's captured value — what a lobster `run:` step
+	// reads as `$id.json` / `$id.stdout`.
+	reportW := outWriter()
+	if opts.output {
+		reportW = errWriter()
+	}
+
 	names := []string{opts.name}
 	if opts.all {
-		names = sortedNames(ts.names())
+		names = workflowkit.SortedNames(ts.tasks)
 	}
-	order, err := ts.closure(names)
+	order, err := workflowkit.Closure(ts.tasks, names)
 	if err != nil {
 		return err
 	}
@@ -53,7 +62,7 @@ func runTaskCLI(ctx context.Context, ex *sdk.Executor, args []string) error {
 	for _, n := range order {
 		// Resolve the task's params (declared defaults <- CLI overrides) BEFORE the
 		// run, so required-param errors surface up front.
-		resolved, perr := resolveParams(ts.tasks[n], opts.params)
+		resolved, perr := workflowkit.ResolveArgs(ts.tasks[n], opts.params)
 		if perr != nil {
 			return fmt.Errorf("task %q: %w", n, perr)
 		}
@@ -67,7 +76,7 @@ func runTaskCLI(ctx context.Context, ex *sdk.Executor, args []string) error {
 		// collected results before returning the error (below) so the report is not
 		// lost; the non-json path prints as it goes.
 		if r.Status == "error" && !opts.json {
-			printResultText(r)
+			printResultText(reportW, r)
 			return fmt.Errorf("task %q failed: %s", n, r.Message)
 		}
 	}
@@ -78,7 +87,13 @@ func runTaskCLI(ctx context.Context, ex *sdk.Executor, args []string) error {
 		}
 	} else {
 		for _, r := range results {
-			printResultText(r)
+			printResultText(reportW, r)
+		}
+		// --output: emit the LAST step's captured value raw on stdout, after the report
+		// has gone to stderr. Nothing is printed when there is no step or the value is
+		// empty (a successful run still exits 0 — never a placeholder).
+		if opts.output {
+			printCapturedValue(results)
 		}
 	}
 	// Exit non-zero when a task aborted or a step failed AND the task does not opt
@@ -101,6 +116,7 @@ type cliOpts struct {
 	list   bool
 	dryRun bool
 	json   bool
+	output bool
 	force  bool
 	params map[string]string
 }
@@ -118,6 +134,8 @@ func parseArgs(args []string) (cliOpts, error) {
 			o.dryRun = true
 		case a == "--json":
 			o.json = true
+		case a == "--output":
+			o.output = true
 		case a == "--force" || a == "-f":
 			o.force = true
 		case a == "--param" || a == "-p":
@@ -145,11 +163,14 @@ func parseArgs(args []string) (cliOpts, error) {
 			o.name = a
 		}
 	}
+	if o.output && o.json {
+		return o, fmt.Errorf("--output and --json are mutually exclusive")
+	}
 	return o, nil
 }
 
 func printList(ts *taskSet, asJSON bool) error {
-	names := sortedNames(ts.names())
+	names := workflowkit.SortedNames(ts.tasks)
 	if asJSON {
 		type item struct {
 			Name        string   `json:"name"`
@@ -177,23 +198,43 @@ func printList(ts *taskSet, asJSON bool) error {
 	return nil
 }
 
-func printResultText(r *runResult) {
+func printResultText(w io.Writer, r *runResult) {
 	switch r.Status {
 	case "up-to-date":
-		fmt.Fprintf(outWriter(), "task %s: %s\n", r.Name, r.Message)
+		fmt.Fprintf(w, "task %s: %s\n", r.Name, r.Message)
 	case "skipped-platform":
-		fmt.Fprintf(outWriter(), "task %s: skipped — %s\n", r.Name, r.Message)
+		fmt.Fprintf(w, "task %s: skipped — %s\n", r.Name, r.Message)
 	case "error":
-		fmt.Fprintf(outWriter(), "task %s: ERROR — %s\n", r.Name, r.Message)
+		fmt.Fprintf(w, "task %s: ERROR — %s\n", r.Name, r.Message)
 	default:
-		fmt.Fprintf(outWriter(), "task %s: %d step(s), %d failed\n", r.Name, len(r.Steps), r.Failed)
+		fmt.Fprintf(w, "task %s: %d step(s), %d failed\n", r.Name, len(r.Steps), r.Failed)
 		// silent: true keeps only the summary, suppressing the per-step lines.
 		if r.Silent {
 			return
 		}
 		for _, s := range r.Steps {
-			fmt.Fprintln(outWriter(), formatStepLine(s))
+			fmt.Fprintln(w, formatStepLine(s))
 		}
+	}
+}
+
+// printCapturedValue writes the FINAL step's captured value raw to stdout — no JSON
+// wrapper, no decoration beyond the trailing newline. That is the value a lobster
+// `run:` step reads back as `$id.json` / `$id.stdout`. "Final step" is the last entry
+// of the LAST task's Steps, so a multi-task closure reports the last task's last step.
+// An absent step or an empty value prints NOTHING (a successful run still exits 0 —
+// never a placeholder). The human report has already gone to stderr, so this is the
+// only thing stdout carries in --output mode.
+func printCapturedValue(results []*runResult) {
+	if len(results) == 0 {
+		return
+	}
+	steps := results[len(results)-1].Steps
+	if len(steps) == 0 {
+		return
+	}
+	if v := steps[len(steps)-1].Result.CapturedValue; v != "" {
+		fmt.Fprintln(outWriter(), v)
 	}
 }
 
@@ -290,13 +331,13 @@ func invokeOpRun(ctx context.Context, req *pb.InvokeRequest) (*pb.InvokeReply, e
 			cli[k] = v
 		}
 	}
-	order, cerr := ts.closure([]string{in.Task})
+	order, cerr := workflowkit.Closure(ts.tasks, []string{in.Task})
 	if cerr != nil {
 		return verbResult(spec.StatusFail, cerr.Error())
 	}
 	ran, failed := 0, 0
 	for _, n := range order {
-		resolved, perr := resolveParams(ts.tasks[n], cli)
+		resolved, perr := workflowkit.ResolveArgs(ts.tasks[n], cli)
 		if perr != nil {
 			return verbResult(spec.StatusFail, fmt.Sprintf("task %q: %v", n, perr))
 		}
@@ -339,3 +380,7 @@ func firstLine(s string) string {
 
 // outWriter is os.Stdout (indirection kept for tests).
 func outWriter() io.Writer { return os.Stdout }
+
+// errWriter is os.Stderr (indirection kept for tests). --output routes the human
+// report here so stdout carries only the captured value.
+func errWriter() io.Writer { return os.Stderr }

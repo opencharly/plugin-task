@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,6 +16,7 @@ import (
 	"github.com/opencharly/sdk/checkkit"
 	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/sdk/loaderkit"
+	"github.com/opencharly/sdk/workflowkit"
 	"github.com/opencharly/spec/spec"
 )
 
@@ -81,11 +82,11 @@ type runResult struct {
 // the CLI), honoring the platform gate, preconditions, the incremental staleness
 // model, the interactive guard, and the task timeout. It never recurses into
 // depends_on. params is the RESOLVED parameter set (declared defaults overlaid with
-// CLI overrides — see resolveParams).
+// CLI overrides — see workflowkit.ResolveArgs).
 func runTask(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, params map[string]string, force, dryRun bool) (*runResult, error) {
 	t, ok := ts.tasks[name]
 	if !ok {
-		return nil, fmt.Errorf("unknown task %q (declared tasks: %s)", name, strings.Join(ts.names(), ", "))
+		return nil, fmt.Errorf("unknown task %q (declared tasks: %s)", name, strings.Join(workflowkit.SortedNames(ts.tasks), ", "))
 	}
 	res := &runResult{Name: name, ContinueOnError: t.ContinueOnError, Silent: t.Silent}
 
@@ -104,11 +105,11 @@ func runTask(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, pa
 		return res, nil
 	}
 
-	dir := resolveTaskDir(ts.dir, t.Dir, mergedEnv(t, params))
+	dir := workflowkit.ResolveTaskDir(ts.dir, t.Dir, workflowkit.MergedEnv(t, params))
 
 	// preconditions — a failing precondition ABORTS (never a silent skip).
 	for _, pc := range t.Preconditions {
-		if code, err := runHostShell(ctx, dir, mergedEnv(t, params), pc); err != nil || code != 0 {
+		if code, err := runHostShell(ctx, dir, workflowkit.MergedEnv(t, params), pc); err != nil || code != 0 {
 			res.Status = "error"
 			res.Message = fmt.Sprintf("precondition failed: %s (exit %d)", pc, code)
 			return res, nil
@@ -141,7 +142,10 @@ func runTask(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, pa
 		}
 	}
 
-	runner := newTaskRunner(ex, ts.dir, t, params)
+	runner, stdin := newTaskRunner(ex, ts.dir, t, params)
+	// The captured-stdin temp file lives only for THIS run — remove it however the walk
+	// exits (the error/early-return paths included).
+	defer stdin.cleanup()
 	set := &spec.LabelDescriptionSet{
 		Candy: []spec.LabeledDescription{{Origin: "task:" + name, Description: t.Description, Plan: t.Plan}},
 	}
@@ -162,6 +166,20 @@ func runTask(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, pa
 	}
 	steps := kit.RunPlan(walkCtx, runner, set, false)
 	res.Steps = steps
+	if stdin.truncated {
+		// A runaway pipe was clipped at maxStdinBytes. Record it on the FIRST step's
+		// Message — the text reporter prints step messages, never res.Message on a
+		// successful run — so the truncation can never pass silently. Steps are the
+		// walk's own slice, so the shared backing array carries the note into the report.
+		note := fmt.Sprintf("TASK_STDIN truncated at %d bytes", maxStdinBytes)
+		if len(steps) > 0 && steps[0].Result.Message != "" {
+			steps[0].Result.Message = note + "\n" + steps[0].Result.Message
+		} else if len(steps) > 0 {
+			steps[0].Result.Message = note
+		} else {
+			res.Message = note
+		}
+	}
 	for _, s := range steps {
 		if s.Result.Status == spec.StatusFail {
 			res.Failed++
@@ -185,10 +203,15 @@ var verbResolverFor = func(ex *sdk.Executor) kit.VerbResolver {
 // newTaskRunner builds the kit.Runner the plan walk drives: a host ShellExecutor
 // venue, the verb resolver (over the reverse-channel executor, so each step's verb
 // dispatches through the host provider registry), and an env carrying the task's
-// vars + resolved params + env for ${VAR} expansion.
-func newTaskRunner(ex *sdk.Executor, projDir string, t spec.Task, params map[string]string) *kit.Runner {
-	env := mergedEnv(t, params)
-	env["TASK_DIR"] = resolveTaskDir(projDir, t.Dir, env)
+// vars + resolved params + env for ${VAR} expansion, plus the captured-stdin
+// exposure when stdin is a pipe.
+//
+// It also returns the stdinCapture whose temp file the caller MUST remove once the
+// walk is done (runTask defers stdin.cleanup()).
+func newTaskRunner(ex *sdk.Executor, projDir string, t spec.Task, params map[string]string) (*kit.Runner, stdinCapture) {
+	env := workflowkit.MergedEnv(t, params)
+	env["TASK_DIR"] = workflowkit.ResolveTaskDir(projDir, t.Dir, env)
+	stdin := captureStdin(env)
 
 	// The plan walk requires a Verbs resolver; command:task is compiled-in so the
 	// reverse-channel executor is always present. A nil ex (out-of-process CliMain)
@@ -207,85 +230,71 @@ func newTaskRunner(ex *sdk.Executor, projDir string, t spec.Task, params map[str
 	if sr, ok := verbs.(interface{ SetRunner(*kit.Runner) }); ok {
 		sr.SetRunner(r)
 	}
-	return r
+	return r, stdin
 }
 
-// mergedEnv is the variable map every step + the dir resolution sees: the task's
-// vars, then its env, then the RESOLVED params (declared defaults overlaid with CLI
-// overrides — see resolveParams). Later sources win on a key collision.
-func mergedEnv(t spec.Task, params map[string]string) map[string]string {
-	env := map[string]string{}
-	for k, v := range t.Vars {
-		env[k] = v
-	}
-	for k, v := range t.Env {
-		env[k] = v
-	}
-	for k, v := range params {
-		env[k] = v
-	}
-	return env
+// maxStdinBytes bounds the piped-stdin read (1 MiB) so a runaway pipe cannot exhaust
+// memory; a longer stream is clipped and the clip is reported on a step Message.
+const maxStdinBytes = 1 << 20
+
+// stdinCapture is the task's piped stdin exposed to its steps: TASK_STDIN carries the
+// bytes and TASK_STDIN_FILE names a temp file holding them, so a step — and a lobster
+// `run:` step above it — can read `$TASK_STDIN` / `$TASK_STDIN_FILE`. file is "" when
+// stdin is a terminal, in which case NEITHER var is defined: an interactive `charly
+// task` must never block on (or consume) the terminal.
+type stdinCapture struct {
+	file      string
+	truncated bool
 }
 
-// resolveParams overlays the task's declared `params:` defaults with the CLI-supplied
-// overrides, and enforces `required: true`. A required param with neither an override
-// nor a default is a hard error (the caller surfaces it).
-func resolveParams(t spec.Task, cli map[string]string) (map[string]string, error) {
-	out := map[string]string{}
-	for name, spec := range t.Params {
-		if v, ok := cli[name]; ok {
-			out[name] = v
-			continue
-		}
-		if spec.Default != nil {
-			out[name] = fmt.Sprint(spec.Default)
-			continue
-		}
-		if spec.Required {
-			return nil, fmt.Errorf("required parameter %q not supplied (--param %s=VALUE)", name, name)
-		}
+// cleanup removes the capture's temp file. runTask defers it so the file is dropped on
+// every exit path (error/early-return included); it is a no-op when none was created.
+func (c stdinCapture) cleanup() {
+	if c.file != "" {
+		_ = os.Remove(c.file)
 	}
-	// Pass through any CLI param not declared (forward-compat, and vars-like usage).
-	for k, v := range cli {
-		if _, declared := t.Params[k]; !declared {
-			out[k] = v
-		}
-	}
-	return out, nil
 }
 
-func (ts *taskSet) names() []string {
-	out := make([]string, 0, len(ts.tasks))
-	for n := range ts.tasks {
-		out = append(out, n)
+// captureStdin reads stdin when it is NOT a terminal and adds TASK_STDIN /
+// TASK_STDIN_FILE to env. Both vars are ALWAYS defined in that mode — possibly empty
+// (empty stdin yields TASK_STDIN="" and a TASK_STDIN_FILE naming an empty file) — so a
+// workflow step can branch on their PRESENCE. When stdin IS a terminal it is left
+// unread and the vars stay absent.
+func captureStdin(env map[string]string) stdinCapture {
+	if stdinIsTerminal() {
+		return stdinCapture{}
 	}
-	return out
-}
-
-// resolveTaskDir resolves a task's dir against the project root, expanding ${VAR} /
-// $VAR references against the merged task env (so `dir: "$HOME/src"` and
-// `dir: "${WORKDIR}/src"` both work).
-func resolveTaskDir(projDir, dir string, env map[string]string) string {
-	if dir == "" {
-		return projDir
+	data, rerr := io.ReadAll(io.LimitReader(os.Stdin, maxStdinBytes+1))
+	if rerr != nil {
+		// An unreadable stdin is not fatal: still define the pair (empty) so the
+		// PRESENCE contract holds.
+		env["TASK_STDIN"] = ""
+		env["TASK_STDIN_FILE"] = ""
+		return stdinCapture{}
 	}
-	dir = expandVars(dir, env)
-	if !filepath.IsAbs(dir) {
-		dir = filepath.Join(projDir, dir)
+	truncated := len(data) > maxStdinBytes
+	if truncated {
+		data = data[:maxStdinBytes]
 	}
-	return dir
-}
-
-// expandVars substitutes ${VAR} and $VAR using env first, then the process
-// environment — so a task's dir/command can reference HOME, the project vars, and
-// resolved params uniformly.
-func expandVars(s string, env map[string]string) string {
-	return os.Expand(s, func(key string) string {
-		if v, ok := env[key]; ok {
-			return v
-		}
-		return os.Getenv(key)
-	})
+	env["TASK_STDIN"] = string(data)
+	cap := stdinCapture{truncated: truncated}
+	f, ferr := os.CreateTemp("", "charly-task-stdin-*")
+	if ferr != nil {
+		// No temp file available: TASK_STDIN still carries the bytes and the FILE var is
+		// present-but-empty, so a step can still test its PRESENCE.
+		env["TASK_STDIN_FILE"] = ""
+		return cap
+	}
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(f.Name())
+		env["TASK_STDIN_FILE"] = ""
+		return cap
+	}
+	cap.file = f.Name()
+	env["TASK_STDIN_FILE"] = cap.file
+	return cap
 }
 
 // stdinIsTerminal reports whether stdin is a real terminal (via the terminal

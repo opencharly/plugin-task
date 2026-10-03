@@ -11,6 +11,7 @@ import (
 
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/kit"
+	"github.com/opencharly/sdk/workflowkit"
 	pb "github.com/opencharly/spec/proto"
 	"github.com/opencharly/spec/spec"
 )
@@ -28,7 +29,7 @@ func TestClosure_DependencyFirst(t *testing.T) {
 		"b": mkTask("b", "c"),
 		"c": mkTask("c"),
 	}}
-	order, err := ts.closure([]string{"a"})
+	order, err := workflowkit.Closure(ts.tasks, []string{"a"})
 	if err != nil {
 		t.Fatalf("closure: %v", err)
 	}
@@ -49,7 +50,7 @@ func TestClosure_Cycle(t *testing.T) {
 		"a": mkTask("a", "b"),
 		"b": mkTask("b", "a"),
 	}}
-	if _, err := ts.closure([]string{"a"}); err == nil {
+	if _, err := workflowkit.Closure(ts.tasks, []string{"a"}); err == nil {
 		t.Fatal("a dependency cycle must be a hard error")
 	}
 }
@@ -57,7 +58,7 @@ func TestClosure_Cycle(t *testing.T) {
 // TestClosure_Unknown proves an unknown dependency is a hard error.
 func TestClosure_Unknown(t *testing.T) {
 	ts := &taskSet{tasks: map[string]spec.Task{"a": mkTask("a", "missing")}}
-	if _, err := ts.closure([]string{"a"}); err == nil {
+	if _, err := workflowkit.Closure(ts.tasks, []string{"a"}); err == nil {
 		t.Fatal("an unknown dependency must be a hard error")
 	}
 }
@@ -126,9 +127,9 @@ func TestInvokeValidate(t *testing.T) {
 
 // TestExpandVars proves ${VAR} / $VAR substitution for dir resolution.
 func TestExpandVars(t *testing.T) {
-	got := expandVars("${ROOT}/src/$SUBDIR", map[string]string{"ROOT": "/w", "SUBDIR": "x"})
+	got := workflowkit.ExpandVars("${ROOT}/src/$SUBDIR", map[string]string{"ROOT": "/w", "SUBDIR": "x"})
 	if got != "/w/src/x" {
-		t.Fatalf("expandVars = %q, want /w/src/x", got)
+		t.Fatalf("ExpandVars = %q, want /w/src/x", got)
 	}
 }
 
@@ -140,20 +141,20 @@ func TestResolveParams(t *testing.T) {
 		"REQUIRED":     {Required: true},
 	}}
 	// CLI override wins; default fills the other.
-	got, err := resolveParams(task, map[string]string{"REQUIRED": "r", "WITH_DEFAULT": "cli"})
+	got, err := workflowkit.ResolveArgs(task, map[string]string{"REQUIRED": "r", "WITH_DEFAULT": "cli"})
 	if err != nil {
-		t.Fatalf("resolveParams: %v", err)
+		t.Fatalf("ResolveArgs: %v", err)
 	}
 	if got["WITH_DEFAULT"] != "cli" || got["REQUIRED"] != "r" {
-		t.Fatalf("resolveParams = %v", got)
+		t.Fatalf("ResolveArgs = %v", got)
 	}
 	// Default applies when not overridden.
-	got, err = resolveParams(task, map[string]string{"REQUIRED": "r"})
+	got, err = workflowkit.ResolveArgs(task, map[string]string{"REQUIRED": "r"})
 	if err != nil || got["WITH_DEFAULT"] != "d" {
 		t.Fatalf("default not applied: %v (%v)", got, err)
 	}
 	// A missing required param errors.
-	if _, err := resolveParams(task, nil); err == nil {
+	if _, err := workflowkit.ResolveArgs(task, nil); err == nil {
 		t.Fatal("a missing required param must error")
 	}
 }
@@ -274,13 +275,17 @@ func TestRunTask_ForceBypassesStatus(t *testing.T) {
 // fakeResolver returns a canned result for the built-in `command` verb, letting a
 // test drive the REAL plan walk (chdir/`dir:`, step order, verdict tallying) without
 // a host reverse channel. The verb dispatch itself is SDK code.
-type fakeResolver struct{ status spec.Status }
+type fakeResolver struct {
+	status   spec.Status
+	captured string
+}
 
 func (f *fakeResolver) RunVerb(_ context.Context, op *spec.Op) (spec.CheckResult, bool) {
 	// The command: verb's plugin_input carries the command; treat a non-empty command
-	// as a pass (the point is the WALK, not the shell).
+	// as a pass (the point is the WALK, not the shell). captured lets a test prove
+	// --output carries a step's CapturedValue verbatim.
 	if op.Plugin == "command" {
-		return spec.CheckResult{Status: f.status}, true
+		return spec.CheckResult{Status: f.status, CapturedValue: f.captured}, true
 	}
 	return spec.CheckResult{}, false
 }
@@ -394,7 +399,7 @@ func TestPrintResultText_EmitsStepMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.Stdout = w
-	printResultText(&runResult{
+	printResultText(outWriter(), &runResult{
 		Name: "map", Status: "ran",
 		Steps: []spec.StepResult{{
 			Keyword: "run", Text: "print the submodule map",
