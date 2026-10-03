@@ -17,10 +17,11 @@ compiled into charly.
 | `verb:file-parity` | `file-parity:` verb step | check / sync that paired files are byte-identical |
 | `verb:splice-region` | `splice-region:` verb step | splice a marked region from a fragment into a target |
 | `verb:module-pins` | `module-pins:` verb step | adopt a source go.mod's require pins across every module a glob matches, then tidy |
+| `verb:prune` | `prune:` verb step | garbage-collect MERGED-UPSTREAM session worktrees + branches across the project root and every submodule (a dry run by default) |
 
 ## Generic maintenance verbs
 
-The four maintenance verbs replace repository shell scripts. Each is **domain-neutral**
+The five maintenance verbs replace repository shell scripts. Each is **domain-neutral**
 and parameterized by the repo's OWN data (paths, pairs, pins) carried in its authored
 input, so the plugin stays reusable by any repository — no org name, repo name, or
 distro list is baked in. They are host-native: like the task engine they act on the
@@ -77,12 +78,34 @@ mods-tidy:
           glob: tools/*
           keys: [github.com/opencharly/sdk, github.com/opencharly/spec]
         context: [deploy]
+
+# Reap session worktrees + branches whose work is already merged upstream.
+# report (default) is a dry run; prune performs it.
+prune:
+  task:
+    description: Remove merged-upstream session worktrees + branches (dry run by default)
+    params:
+      MODE: {description: report|prune, default: report}
+    plan:
+      - run: prune merged-upstream worktrees and branches
+        prune:
+          mode: "${MODE}"
+        context: [deploy]
 ```
 
 Each verb's input is validated against its `#<Name>Input` CUE def at load; the handler
 returns a `pass`/`fail`/`skip` verdict the plan harness decodes. A `git-submodules
 verify` FAILS LOUDLY on a missing gitlink on either side (never a vacuous empty==empty
 pass); `module-pins check` reports every stale module.
+
+`prune` is **fail-safe by construction**: it removes a worktree/branch only when the
+merge is *proven* — the tip is an ancestor of `base` (`origin/main`), or its PR is
+MERGED and its tip is contained in the merged head (the squash-merge case git ancestry
+alone cannot see). A branch carrying commits *beyond* a merged head, or a worktree with
+modified tracked files, is never touched. If `gh` is unavailable (no auth, offline), it
+prunes strictly *less*; `local_only: true` skips GitHub entirely and prunes only
+ancestry-merged branches. `include_closed: true` additionally reaps abandoned CLOSED-PR
+worktrees. `base` defaults to `origin/main`.
 
 
 ## Authoring a task
