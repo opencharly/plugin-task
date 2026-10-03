@@ -70,7 +70,7 @@ if "$CH" task failtask; then echo "FAIL: a failing task must exit non-zero" >&2;
 json="$("$CH" task failtask --json 2>&1 || true)"
 echo "$json" | grep -q '"failed": 1' || { echo "FAIL: --json report missing the tally" >&2; exit 1; }
 # ---------------------------------------------------------------------------
-# 2) The four maintenance verbs, each exercised LIVE on a real git fixture.
+# 2) The generic maintenance verbs, each exercised LIVE on a real git fixture.
 # ---------------------------------------------------------------------------
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 FIX="$WORK/fixture"
@@ -199,6 +199,14 @@ missing-pin:
       - check: the missing twin fails
         git-submodules: {mode: verify, pinned_from: ../src, pin_map: {target: nope/absent}}
         context: [runtime]
+prune:
+  task:
+    description: reap merged-upstream worktrees and branches (local ancestry only)
+    dir: .
+    plan:
+      - run: prune merged worktrees and branches
+        prune: {mode: prune, base: main, local_only: true}
+        context: [deploy]
 YML
 
 # A second project exercising the LOAD-BEARING bump order (pinned_from is itself a
@@ -271,4 +279,41 @@ mods_out="$("$CH" task mods)"; echo "$mods_out" | grep -q '0 failed' || { echo "
 grep -q 'github.com/opencharly/sdk v1.2.3' tools/m1/go.mod || { echo "FAIL: module-pins did not adopt the pin" >&2; exit 1; }
 mods2_out="$("$CH" task mods-check)"; echo "$mods2_out" | grep -q '0 failed' || { echo "FAIL: module-pins check must pass after adopt" >&2; exit 1; }
 
-echo "gate-task: PASS — command:task + all four maintenance verbs executed live against charly $CHARLY_TAG"
+# ---------------------------------------------------------------------------
+# 3) verb:prune — reap merged-upstream worktrees + branches LIVE.
+# The fixture is a real repo whose `main` IS the merge base, with a merged
+# worktree/branch and an unmerged one; prune must remove the former and keep the
+# latter. `local_only: true` keeps the gate hermetic (no gh, no network).
+# ---------------------------------------------------------------------------
+PRUNE="$WORK/pruneproj"
+mkdir -p "$PRUNE"
+(
+  cd "$PRUNE" && git init -q -b main
+  echo base > f && git add -A && G commit -qm base
+  # merged branch = fast-forward onto main (ancestor)
+  git branch feat/merged main
+  # unmerged branch = a commit NOT on main
+  git switch -q -c feat/wip && echo wip > w && git add -A && G commit -qm wip && git switch -q main
+  # a linked session worktree on each
+  git worktree add -q .worktrees/aa-merged feat/merged
+  git worktree add -q .worktrees/bb-wip feat/wip
+)
+cat > "$PRUNE/charly.yml" <<'YML'
+version: 2026.261.1747
+prune:
+  task:
+    description: reap merged-upstream worktrees and branches
+    dir: .
+    plan:
+      - run: prune merged worktrees and branches
+        prune: {mode: prune, base: main, local_only: true}
+        context: [deploy]
+YML
+echo "== verb:prune (removes merged worktree+branch, keeps unmerged) =="
+prune_out="$(cd "$PRUNE" && "$CH" task prune)"; echo "$prune_out" | grep -q '0 failed' || { echo "FAIL: prune did not run" >&2; echo "$prune_out"; exit 1; }
+(cd "$PRUNE" && git rev-parse -q --verify refs/heads/feat/merged >/dev/null) && { echo "FAIL: merged branch survived prune" >&2; exit 1; }
+(cd "$PRUNE" && git rev-parse -q --verify refs/heads/feat/wip >/dev/null) || { echo "FAIL: unmerged branch was pruned" >&2; exit 1; }
+[ -d "$PRUNE/.worktrees/aa-merged" ] && { echo "FAIL: merged worktree survived prune" >&2; exit 1; }
+[ -f "$PRUNE/.worktrees/bb-wip/.git" ] || { echo "FAIL: unmerged worktree was removed" >&2; exit 1; }
+
+echo "gate-task: PASS — command:task + all five maintenance verbs executed live against charly $CHARLY_TAG"

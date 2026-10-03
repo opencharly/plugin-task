@@ -2,7 +2,7 @@ plugin-task:
     candy:
         description: |-
             The generic declarative TASK runner for charly — the replacement for a
-            Taskfile. Serves three task capabilities plus four generic maintenance
+            Taskfile. Serves three task capabilities plus five generic maintenance
             verbs. Task capabilities: `kind:task` (a named, host-native, REUSABLE plan
             authored as a `task:` node in charly.yml, using the SAME #Step/#Op grammar a
             candy's plan uses), `command:task` (`charly task [list] [<name>] [--dry-run]
@@ -15,14 +15,19 @@ plugin-task:
             #TaskValue (a task's `plan: [...#Step]` references the base #Step grammar,
             which a self-contained plugin schema cannot carry).
 
-            Four GENERIC, domain-neutral MAINTENANCE verbs replace repository shell
+            Five GENERIC, domain-neutral MAINTENANCE verbs replace repository shell
             scripts, each parameterized by the repo's own data (paths/pairs/pins) so the
             plugin stays reusable by any repository: `verb:git-submodules` (status/bump/
             verify `.gitmodules` pins, incl. the policy-B comparison of a repo's pins
             against a pinned checkout's gitlinks), `verb:file-parity` (check/sync that
             paired files are byte-identical), `verb:splice-region` (splice a marked
-            region from a fragment into a target), and `verb:module-pins` (adopt a
-            source go.mod's require pins across every module a glob matches, then tidy).
+            region from a fragment into a target), `verb:module-pins` (adopt a
+            source go.mod's require pins across every module a glob matches, then tidy),
+            and `verb:prune` (garbage-collect MERGED-UPSTREAM session worktrees +
+            branches across the project root and every submodule — the mechanical
+            reaper the close-out contract's per-session prose never provided; a branch
+            is pruned only when its merge is PROVEN, and a CLOSED/abandoned PR is pruned
+            only under an explicit opt-in).
 
             COMPILED-IN by default (the command needs the host's loaded project over
             the reverse channel; the maintenance verbs are host-native and act on the
@@ -37,6 +42,7 @@ plugin-task:
                 - verb:file-parity
                 - verb:splice-region
                 - verb:module-pins
+                - verb:prune
             primary:
                 task: task
         plan:
@@ -45,8 +51,8 @@ plugin-task:
               context:
                 - build
               command: "test -f plugin.go && test -f schema/task.cue && test -f params/cue_types_gen.go && echo 'plugin.go schema/task.cue params/cue_types_gen.go all present'"
-            - check: the provider source declares all seven capabilities (the three task classes individually + the four maintenance verbs) — a deterministic probe that fails if a capability is dropped
+            - check: the provider source declares all eight capabilities (the three task classes individually + the five maintenance verbs) — a deterministic probe that fails if a capability is dropped
               id: task-capabilities-declared
               context:
                 - build
-              command: "grep -q 'Class: \"kind\", Word: \"task\"' plugin.go && grep -q 'Class: \"command\", Word: \"task\"' plugin.go && grep -q 'Class: \"verb\", Word: \"task\"' plugin.go && grep -q 'Word: \"git-submodules\"' plugin.go && grep -q 'Word: \"file-parity\"' plugin.go && grep -q 'Word: \"splice-region\"' plugin.go && grep -q 'Word: \"module-pins\"' plugin.go && echo 'kind/command/verb:task + four maintenance verbs declared'"
+              command: "grep -q 'Class: \"kind\", Word: \"task\"' plugin.go && grep -q 'Class: \"command\", Word: \"task\"' plugin.go && grep -q 'Class: \"verb\", Word: \"task\"' plugin.go && grep -q 'Word: \"git-submodules\"' plugin.go && grep -q 'Word: \"file-parity\"' plugin.go && grep -q 'Word: \"splice-region\"' plugin.go && grep -q 'Word: \"module-pins\"' plugin.go && grep -q 'Word: \"prune\"' plugin.go && echo 'kind/command/verb:task + five maintenance verbs declared'"
