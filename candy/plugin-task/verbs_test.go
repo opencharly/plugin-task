@@ -372,3 +372,146 @@ func TestGitSubmodules_BumpOrder(t *testing.T) {
 		t.Fatalf("target pinned to %s, want L2=%s (L1=%s means it read stale src)", got, L2, L1)
 	}
 }
+
+// TestGitSubmodules_BumpUninitializedFailsLoud proves charly#768's fix: a submodule
+// directory that is present-but-UNINITIALIZED (no `.git`) must make `bump` FAIL LOUD
+// and must NOT be operated on through git's walk-up to the superproject. Before the
+// fix, `git -C <empty-submodule-dir> switch --detach` switched the UMBRELLA.
+func TestGitSubmodules_BumpUninitializedFailsLoud(t *testing.T) {
+	base := t.TempDir()
+
+	// A leaf submodule SOURCE with two commits (so there is a real ref to switch to).
+	leaf := filepath.Join(base, "leaf")
+	run := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	mustGitMay := func(dir string, args ...string) (string, bool) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		out, err := cmd.CombinedOutput()
+		return strings.TrimSpace(string(out)), err == nil
+	}
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(leaf, "init", "-q", "-b", "main")
+	writeFile(t, filepath.Join(leaf, "f"), "L1")
+	run(leaf, "add", "-A")
+	run(leaf, "commit", "-qm", "L1")
+	leafBare := filepath.Join(base, "leaf.git")
+	run(base, "clone", "-q", "--bare", leaf, leafBare)
+
+	// umb declares the submodule `target` in .gitmodules but NEVER initializes it:
+	// the directory exists and is EMPTY (the exact post-`git worktree add` state).
+	umb := filepath.Join(base, "umb")
+	if err := os.MkdirAll(umb, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(umb, "init", "-q", "-b", "main")
+	writeFile(t, filepath.Join(umb, "u"), "u")
+	run(umb, "add", "-A")
+	run(umb, "commit", "-qm", "u")
+	writeFile(t, filepath.Join(umb, ".gitmodules"),
+		"[submodule \"target\"]\n\tpath = target\n\turl = "+leafBare+"\n\tbranch = main\n")
+	run(umb, "add", ".gitmodules")
+	run(umb, "commit", "-qm", "gitmodules")
+	// Stage a bogus gitlink for `target` and create the EMPTY dir (no .git).
+	head := run(umb, "rev-parse", "HEAD")
+	if out, ok := mustGitMay(umb, "update-index", "--add", "--cacheinfo", "160000,"+head+",target"); !ok {
+		t.Fatalf("update-index: %s", out)
+	}
+	run(umb, "commit", "-qm", "staged gitlink")
+	if err := os.MkdirAll(filepath.Join(umb, "target"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(umb, "target", ".git")); err == nil {
+		t.Fatalf("fixture precondition: target must have no .git")
+	}
+	// Give the UMBRELLA an `origin` with an `origin/main` ref, so that pre-fix the
+	// `git -C target switch --detach origin/main` walk-up would GENUINELY switch the
+	// umbrella (the real charly#768 regression) rather than erroring out.
+	umbOrigin := filepath.Join(base, "umb-origin.git")
+	run(base, "clone", "-q", "--bare", umb, umbOrigin)
+	run(umb, "remote", "add", "origin", umbOrigin)
+	run(umb, "fetch", "-q", "origin")
+	run(umb, "branch", "--set-upstream-to=origin/main", "main")
+
+	// Record the UMBRELLA's own HEAD+branch BEFORE the bump, to prove it is untouched.
+	umbHeadBefore := run(umb, "rev-parse", "HEAD")
+	umbBranchBefore := run(umb, "rev-parse", "--abbrev-ref", "HEAD")
+
+	// bump over the WHOLE module set (no pin_map) — `target` rolls to origin/main.
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
+	if st != spec.StatusFail {
+		t.Fatalf("bump over an uninitialized submodule must FAIL LOUD, got %s: %s", st, msg)
+	}
+	if !strings.Contains(msg, "not an initialized checkout") {
+		t.Fatalf("failure must name the uninitialized checkout, got: %s", msg)
+	}
+
+	// THE REGRESSION ASSERTION: the umbrella must be EXACTLY where it was — same
+	// HEAD, same branch. Pre-fix, `git -C target switch --detach origin/main` walked
+	// up and detached the umbrella.
+	if got := run(umb, "rev-parse", "HEAD"); got != umbHeadBefore {
+		t.Fatalf("umbrella HEAD moved: %s -> %s", umbHeadBefore, got)
+	}
+	if got := run(umb, "rev-parse", "--abbrev-ref", "HEAD"); got != umbBranchBefore {
+		t.Fatalf("umbrella branch changed: %q -> %q (the walk-up detach regression)", umbBranchBefore, got)
+	}
+}
+
+// TestSubmoduleAt proves the guard's contract directly: an initialized submodule
+// yields a walk-up-safe --git-dir/--work-tree pair; a bare/uninitialized dir errors.
+func TestSubmoduleAt(t *testing.T) {
+	base := t.TempDir()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	sub := filepath.Join(base, "sub")
+	run(base, "init", "-q", "-b", "main", "sub")
+	writeFile(t, filepath.Join(sub, "s"), "s")
+	run(sub, "add", "-A")
+	run(sub, "commit", "-qm", "s")
+	proj := filepath.Join(base, "proj")
+	run(base, "init", "-q", "-b", "main", "proj")
+	writeFile(t, filepath.Join(proj, "p"), "p")
+	run(proj, "add", "-A")
+	run(proj, "commit", "-qm", "p")
+	run(proj, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sub")
+
+	// Initialized: resolves + yields an absolute git-dir pointing at the submodule.
+	abs, gitArgs, err := submoduleAt(proj, "sub")
+	if err != nil {
+		t.Fatalf("initialized submodule must resolve: %v", err)
+	}
+	if abs != filepath.Join(proj, "sub") {
+		t.Fatalf("abs = %q", abs)
+	}
+	if !strings.Contains(gitArgs, filepath.Join(proj, "sub", ".git")) {
+		t.Fatalf("gitArgs must target the submodule's .git: %q", gitArgs)
+	}
+
+	// Uninitialized: errors and never yields a walk-up-prone form.
+	if err := os.MkdirAll(filepath.Join(proj, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := submoduleAt(proj, "empty"); err == nil {
+		t.Fatalf("an uninitialized submodule dir must error")
+	}
+}

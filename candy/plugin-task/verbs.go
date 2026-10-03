@@ -161,6 +161,24 @@ func gitlink(projDir, path string) string {
 	return strings.TrimSpace(out)
 }
 
+// submoduleGitlink reads `subpath`'s recorded gitlink (SHA) from the tree at HEAD
+// of the INITIALIZED submodule at `path`, through submoduleAt's walk-up-safe form
+// (charly#768). Empty on any failure (missing/uninitialized submodule, absent
+// path) — the caller classifies an empty result as a loud failure, never a
+// vacuous pass.
+func submoduleGitlink(projDir, path, subpath string) string {
+	_, gitArgs, aerr := submoduleAt(projDir, path)
+	if aerr != nil {
+		return ""
+	}
+	out, _, exit := hostCapture(context.Background(), projDir,
+		fmt.Sprintf("git %s ls-tree HEAD %s | awk '{print $3}'", gitArgs, shellQuote(subpath)))
+	if exit != 0 {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
 // runGitSubmodules maintains `.gitmodules` pins.
 //
 //	status — print PATH BRANCH PIN [DIRTY] for every submodule
@@ -184,10 +202,18 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		fmt.Fprintf(&b, "%-28s %-10s %s\n", "PATH", "BRANCH", "PIN")
 		for _, p := range paths {
 			branch := submoduleBranch(projDir, p)
+			// Read through submoduleAt's walk-up-safe form (charly#768): `git -C`
+			// on an uninitialized submodule reads the SUPERPROJECT's HEAD. An
+			// uninitialized checkout has no pin to report.
+			_, gitArgs, aerr := submoduleAt(projDir, p)
+			if aerr != nil {
+				fmt.Fprintf(&b, "%-28s %-10s %s\n", p, branch, "- (uninitialized)")
+				continue
+			}
 			pin, _, _ := hostCapture(context.Background(), projDir,
-				fmt.Sprintf("git -C %s rev-parse --short HEAD 2>/dev/null || echo '-'", shellQuote(p)))
+				fmt.Sprintf("git %s rev-parse --short HEAD 2>/dev/null || echo '-'", gitArgs))
 			dirty, _, _ := hostCapture(context.Background(), projDir,
-				fmt.Sprintf("git -C %s status --porcelain 2>/dev/null | head -1", shellQuote(p)))
+				fmt.Sprintf("git %s status --porcelain 2>/dev/null | head -1", gitArgs))
 			marker := ""
 			if strings.TrimSpace(dirty) != "" {
 				marker = " DIRTY"
@@ -225,13 +251,11 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 			if skipped[upath] {
 				continue
 			}
-			sha, _, exit := hostCapture(context.Background(), projDir,
-				fmt.Sprintf("env -u GIT_DIR -u GIT_WORK_TREE git -C %s ls-tree HEAD %s | awk '{print $3}'",
-					shellQuote(in.PinnedFrom), shellQuote(cpath)))
-			if exit != 0 || strings.TrimSpace(sha) == "" {
+			sha := submoduleGitlink(projDir, in.PinnedFrom, cpath)
+			if sha == "" {
 				return spec.StatusFail, fmt.Sprintf("no gitlink for %q in %q", cpath, in.PinnedFrom)
 			}
-			if st, msg := pinSubmodule(projDir, upath, strings.TrimSpace(sha)); st != spec.StatusPass {
+			if st, msg := pinSubmodule(projDir, upath, sha); st != spec.StatusPass {
 				return st, msg
 			}
 			done = append(done, upath)
@@ -241,10 +265,7 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 
 	case "verify":
 		for upath, cpath := range in.PinMap {
-			want, _, _ := hostCapture(context.Background(), projDir,
-				fmt.Sprintf("env -u GIT_DIR -u GIT_WORK_TREE git -C %s ls-tree HEAD %s | awk '{print $3}'",
-					shellQuote(in.PinnedFrom), shellQuote(cpath)))
-			want = strings.TrimSpace(want)
+			want := submoduleGitlink(projDir, in.PinnedFrom, cpath)
 			got := gitlink(projDir, upath)
 			// A MISSING gitlink on either side must FAIL — never compare empty to
 			// empty and report a vacuous policy-B pass.
@@ -267,18 +288,52 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 	}
 }
 
+// submoduleAt returns the absolute path of an INITIALIZED submodule checkout at
+// `path` plus the `--git-dir`/`--work-tree` argv prefix that operates on exactly
+// that repo. It FAILS LOUD when `path` is not an initialized submodule.
+//
+// WHY the guard (charly#768): `git -C <path>` only CHANGES DIRECTORY. On a
+// present-but-uninitialized submodule directory — the normal state of a freshly
+// created `git worktree` that has not run `git submodule update --init` — git
+// WALKS UP to the enclosing repository and resolves to the SUPERPROJECT, so a
+// `git -C <empty-submodule-dir> switch --detach <ref>` silently switched the
+// UMBRELLA (detaching `charly task sync`'s caller from its branch). The
+// `--git-dir`/`--work-tree` form cannot walk up: a stray directory resolves to
+// nothing (exit 128), never to the parent.
+func submoduleAt(projDir, path string) (abs, gitArgs string, err error) {
+	abs = filepath.Join(projDir, path)
+	dotgit := filepath.Join(abs, ".git")
+	if _, statErr := os.Stat(dotgit); statErr != nil {
+		return "", "", fmt.Errorf(
+			"submodule %q is not an initialized checkout (%s is absent) — run `git submodule update --init %s`",
+			path, dotgit, path)
+	}
+	return abs, fmt.Sprintf("--git-dir=%s --work-tree=%s", shellQuote(dotgit), shellQuote(abs)), nil
+}
+
 // pinSubmodule fetches ref (falling back to an explicit SHA fetch for a shallow
 // clone — the exact failure sync-gitlinks.sh documents), detaches, and stages.
+// It refuses an uninitialized submodule (charly#768) and drives the checkout
+// through submoduleAt's walk-up-safe `--git-dir`/`--work-tree` form.
 func pinSubmodule(projDir, path, ref string) (spec.Status, string) {
+	_, gitArgs, aerr := submoduleAt(projDir, path)
+	if aerr != nil {
+		return spec.StatusFail, aerr.Error()
+	}
 	fetch := fmt.Sprintf(
-		"set -e; git -C %s fetch --quiet origin; "+
-			"if ! git -C %s cat-file -e %s^{commit} 2>/dev/null; then git -C %s fetch --quiet origin %s; fi; "+
-			"git -C %s switch --quiet --detach %s; git add %s",
-		shellQuote(path), shellQuote(path), shellQuote(ref), shellQuote(path), shellQuote(ref),
-		shellQuote(path), shellQuote(ref), shellQuote(path))
+		"set -e; git %s fetch --quiet origin; "+
+			"if ! git %s cat-file -e %s^{commit} 2>/dev/null; then git %s fetch --quiet origin %s; fi; "+
+			"git %s switch --quiet --detach %s",
+		gitArgs, gitArgs, shellQuote(ref), gitArgs, shellQuote(ref), gitArgs, shellQuote(ref))
 	_, stderr, exit := hostCapture(context.Background(), projDir, fetch)
 	if exit != 0 {
 		return spec.StatusFail, fmt.Sprintf("pin %s -> %s failed: %s", path, ref, strings.TrimSpace(stderr))
+	}
+	// Stage the gitlink in the SUPERPROJECT (a separate repo from the submodule,
+	// hence a separate git invocation, run with the project dir as its cwd).
+	if _, stderr, exit := hostCapture(context.Background(), projDir,
+		fmt.Sprintf("git add %s", shellQuote(path))); exit != 0 {
+		return spec.StatusFail, fmt.Sprintf("stage %s failed: %s", path, strings.TrimSpace(stderr))
 	}
 	return spec.StatusPass, ""
 }
