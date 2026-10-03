@@ -49,12 +49,13 @@ func NewMeta() pb.PluginMetaServer {
 		{Class: "kind", Word: "task", Validates: true},
 		{Class: "verb", Word: "task", InputDef: "#TaskInput", Primary: "task"},
 		{Class: "command", Word: "task"},
-		// The four generic, domain-neutral maintenance verbs (each parameterized by
+		// The five generic, domain-neutral maintenance verbs (each parameterized by
 		// the repo's own data — see schema/task.cue + verbs.go).
 		{Class: "verb", Word: "git-submodules", InputDef: "#GitSubmodulesInput"},
 		{Class: "verb", Word: "file-parity", InputDef: "#FileParityInput"},
 		{Class: "verb", Word: "splice-region", InputDef: "#SpliceRegionInput"},
 		{Class: "verb", Word: "module-pins", InputDef: "#ModulePinsInput"},
+		{Class: "verb", Word: "prune", InputDef: "#PruneInput"},
 	}, schemaFS)
 }
 
@@ -76,7 +77,7 @@ func (p *provider) Invoke(ctx context.Context, req *pb.InvokeRequest) (*pb.Invok
 			// (`{"args":[...]}`); the verb path carries a plugin_input map
 			// (`{"task":...,"param":[...]}`), distinguished by the input shape.
 			return invokeOpRun(ctx, req)
-		case "git-submodules", "file-parity", "splice-region", "module-pins":
+		case "git-submodules", "file-parity", "splice-region", "module-pins", "prune":
 			// The generic maintenance verbs: decode the op envelope's nested
 			// plugin_input and run the host-native handler.
 			return invokeMaintenanceVerb(req)

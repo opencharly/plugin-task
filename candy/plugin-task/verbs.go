@@ -83,6 +83,12 @@ func runMaintenanceVerbIn(projDir, word string, input map[string]any) (spec.Stat
 			return spec.StatusFail, derr.Error()
 		}
 		return runModulePins(projDir, in)
+	case "prune":
+		var in params.PruneInput
+		if derr := decodeInput(input, &in); derr != nil {
+			return spec.StatusFail, derr.Error()
+		}
+		return runPrune(projDir, in)
 	default:
 		return spec.StatusFail, fmt.Sprintf("plugin-task: unknown maintenance verb %q", word)
 	}

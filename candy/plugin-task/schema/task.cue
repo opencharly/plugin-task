@@ -79,3 +79,26 @@
 	// keys are the module paths whose pins are adopted (e.g. sdk, spec).
 	keys: [...string]
 }
+
+// #PruneInput garbage-collects merged-upstream session worktrees + branches: the
+// session-scoped `.worktrees/<slug>/<repo>/` linked worktrees, the umbrella
+// root's own worktrees, and the local `feat/` branches they pinned — across the
+// umbrella root AND every submodule. A branch is prunable when its work is
+// already on the merge target: its tip is an ancestor of `base`, OR its PR is
+// MERGED and its tip is contained in the merged PR head (the squash-merge case
+// git ancestry alone cannot see). A branch with commits BEYOND a merged head
+// (unmerged local work) is NEVER pruned. Domain-neutral: the repo and merge
+// target come from the authored input, never baked in (R3 / boundary law).
+#PruneInput: {
+	// mode: report lists what would be pruned (a dry run); prune performs it.
+	mode?: "report" | "prune"
+	// base is the merge target a branch must be merged into (default origin/main).
+	base?: string
+	// include_closed also prunes worktrees/branches whose PR is CLOSED (abandoned).
+	// Off by default: a closed branch may hold unmerged work.
+	include_closed?: bool @go(IncludeClosed)
+	// local_only skips the GitHub PR-state lookup. It then CANNOT see a
+	// squash-merged branch whose remote ref still survives (git ancestry alone
+	// misses it), so it prunes strictly less — never more.
+	local_only?: bool @go(LocalOnly)
+}

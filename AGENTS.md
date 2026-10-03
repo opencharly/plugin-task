@@ -1,9 +1,9 @@
 # AGENTS.md — plugin-task
 
 Standalone plugin repo for the generic declarative TASK runner (`kind:task`,
-`command:task`, `verb:task`) plus four generic maintenance verbs
+`command:task`, `verb:task`) plus five generic maintenance verbs
 (`verb:git-submodules`, `verb:file-parity`, `verb:splice-region`,
-`verb:module-pins`). The Go module lives at `candy/plugin-task/` (module path
+`verb:module-pins`, `verb:prune`). The Go module lives at `candy/plugin-task/` (module path
 `github.com/opencharly/plugin-task/candy/plugin-task`); the root `charly.yml`
 declares `discover: candy` so the repo is a project and its candy is scanned.
 
@@ -15,7 +15,7 @@ Canonical files:
   capability declarations.
 - `candy/plugin-task/grammar.go`, `graph.go`, `runner.go`, `incremental.go`,
   `verbs.go`, `cli.go` — the task engine, dependency graph, incremental
-  semantics, the four maintenance verbs, and the CLI.
+  semantics, the five maintenance verbs, and the CLI.
 - `candy/plugin-task/schema/task.cue` + `params/cue_types_gen.go` — the
   self-contained schema and its generated types.
 - `candy/plugin-task/cmd/serve/main.go` — the out-of-process serve shim.
@@ -57,7 +57,7 @@ when one is authored, add it here.
 - The task body is the base-schema `#Task`, validated host-side against
   `#TaskValue`; keep the engine reusing `kit.RunPlan` + `checkkit.VerbResolver`
   over `kit.ShellExecutor{}` — there is no second execution engine.
-- The four maintenance verbs stay domain-neutral and parameterized by the repo's
+- The five maintenance verbs stay domain-neutral and parameterized by the repo's
   own data; never bake an org, repo, or distro name into the plugin.
 
 ## Landing
