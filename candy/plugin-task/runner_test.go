@@ -145,7 +145,7 @@ func TestCaptureStdin_TTYLeavesVarsAbsent(t *testing.T) {
 		}
 		t.Skip("SKIP: no usable pseudo-terminal in this environment (TTY-absent arm not exercised)")
 	}
-	defer tty.Close()
+	defer func() { _ = tty.Close() }()
 	old := os.Stdin
 	os.Stdin = tty
 	env := map[string]string{}
