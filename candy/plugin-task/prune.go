@@ -60,8 +60,7 @@ type worktreeEntry struct {
 	Head     string
 	Branch   string // short name; "" when detached
 	Detached bool
-	Main     bool   // the first block is the repo's own checkout
-	RepoDir  string // the repo whose worktree list reported it (for remove/branch ops)
+	Main     bool // the first block is the repo's own checkout
 }
 
 // prunable records one worktree/branch the sweep decided to act on.
@@ -129,7 +128,7 @@ func runPrune(projDir string, in params.PruneInput) (spec.Status, string) {
 				skipped = append(skipped, relRepo(projDir, r)+":worktree "+w.Path+" (detached HEAD — no branch to prove merged)")
 				continue
 			}
-			trackClean, hasUntracked := worktreeStatus(w.Path)
+			trackClean, untracked := worktreeStatus(w.Path)
 			if !trackClean {
 				skipped = append(skipped, relRepo(projDir, r)+":worktree "+w.Path+" (modified tracked files)")
 				continue
@@ -138,10 +137,17 @@ func runPrune(projDir string, in params.PruneInput) (spec.Status, string) {
 			if !ok {
 				continue
 			}
-			p := prunable{Repo: relRepo(projDir, r), Kind: "worktree", Target: w.Path, Reason: why}
+			// `git worktree remove` refuses a worktree with untracked entries, so a
+			// force is required to reap it — and that DISCARDS the untracked files.
+			// The count is carried into the report so the discard is never silent.
+			reason := why
+			if untracked > 0 {
+				reason = fmt.Sprintf("%s; discards %d untracked entr%s", why, untracked, plural(untracked))
+			}
+			p := prunable{Repo: relRepo(projDir, r), Kind: "worktree", Target: w.Path, Reason: reason}
 			plan = append(plan, p)
 			if mode == "prune" {
-				if err := removeWorktree(r, w.Path, hasUntracked); err != nil {
+				if err := removeWorktree(r, w.Path, untracked > 0); err != nil {
 					return spec.StatusFail, fmt.Sprintf("prune: remove worktree %s: %v", w.Path, err)
 				}
 				acted = append(acted, p)
@@ -191,9 +197,6 @@ func runPrune(projDir string, in params.PruneInput) (spec.Status, string) {
 	}
 
 	out := renderPrune(mode, base, in, plan, acted, skipped)
-	if mode == "report" {
-		return spec.StatusPass, out
-	}
 	return spec.StatusPass, out
 }
 
@@ -262,7 +265,6 @@ func listWorktrees(repoDir string) ([]worktreeEntry, error) {
 	cur := &worktreeEntry{}
 	flush := func() {
 		if cur.Path != "" {
-			cur.RepoDir = repoDir
 			res = append(res, *cur)
 		}
 		cur = &worktreeEntry{}
@@ -290,9 +292,10 @@ func listWorktrees(repoDir string) ([]worktreeEntry, error) {
 }
 
 // worktreeStatus reports whether the worktree has NO modified tracked files, and
-// whether it has untracked entries (which a plain `worktree remove` refuses, so
-// the removal is forced for those only).
-func worktreeStatus(wt string) (trackClean, hasUntracked bool) {
+// how many untracked entries it has. `git worktree remove` REFUSES a worktree with
+// untracked entries, so the removal is forced for those — which DISCARDS them. The
+// count is surfaced in the report so that discard is never silent.
+func worktreeStatus(wt string) (trackClean bool, untracked int) {
 	out, _ := gitCapture(wt, "status", "--porcelain")
 	trackClean = true
 	for _, l := range strings.Split(out, "\n") {
@@ -301,12 +304,12 @@ func worktreeStatus(wt string) (trackClean, hasUntracked bool) {
 			continue
 		}
 		if strings.HasPrefix(l, "??") {
-			hasUntracked = true
+			untracked++
 			continue
 		}
 		trackClean = false
 	}
-	return trackClean, hasUntracked
+	return trackClean, untracked
 }
 
 // listLocalBranches returns every local branch short name.
@@ -368,6 +371,15 @@ func gitCapture(dir string, args ...string) (string, int) {
 	}
 	out, _, exit := hostCapture(context.Background(), dir, script)
 	return strings.TrimSpace(out), exit
+}
+
+// plural returns "y"/"ies" for a count, so a report line reads
+// "1 untracked entry" / "2 untracked entries".
+func plural(n int) string {
+	if n == 1 {
+		return "y"
+	}
+	return "ies"
 }
 
 // pathWithin reports whether p is dir itself or lies under it.

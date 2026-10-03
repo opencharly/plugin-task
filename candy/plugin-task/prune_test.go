@@ -64,8 +64,6 @@ func newPruneProject(t *testing.T) string {
 	// origin/HEAD -> origin/main
 	pruneGit(t, proj, "remote", "set-head", "origin", "main")
 
-	mergedTip := pruneGit(t, proj, "rev-parse", "main")
-
 	// feat/merged: branched and fast-forwarded onto main (tip == main, ancestor).
 	pruneGit(t, proj, "branch", "feat/merged", "main")
 
@@ -75,6 +73,15 @@ func newPruneProject(t *testing.T) string {
 	pruneGit(t, proj, "add", "-A")
 	pruneGit(t, proj, "commit", "-qm", "squashed work")
 	squashedTip := pruneGit(t, proj, "rev-parse", "HEAD")
+	pruneGit(t, proj, "switch", "-q", "main")
+
+	// feat/abandoned: a commit NOT on main; its PR is CLOSED (abandoned) with a head
+	// == the branch tip. Reaped ONLY under include_closed.
+	pruneGit(t, proj, "switch", "-q", "-c", "feat/abandoned")
+	writeFile(t, filepath.Join(proj, "a"), "abandoned work")
+	pruneGit(t, proj, "add", "-A")
+	pruneGit(t, proj, "commit", "-qm", "abandoned work")
+	abandonedTip := pruneGit(t, proj, "rev-parse", "HEAD")
 	pruneGit(t, proj, "switch", "-q", "main")
 
 	// feat/wip: a commit NOT on main, no PR — must never be pruned.
@@ -89,16 +96,19 @@ func newPruneProject(t *testing.T) string {
 	pruneGit(t, proj, "worktree", "add", "-q", wtMerged, "feat/merged")
 	wtWip := filepath.Join(proj, ".worktrees", "bb-wip", "proj")
 	pruneGit(t, proj, "worktree", "add", "-q", wtWip, "feat/wip")
+	// A worktree on feat/abandoned, so the closed arm is exercised for BOTH kinds.
+	wtAbandoned := filepath.Join(proj, ".worktrees", "cc-abandoned", "proj")
+	pruneGit(t, proj, "worktree", "add", "-q", wtAbandoned, "feat/abandoned")
 
-	// Fixture PR state, keyed by head branch.
+	// Fixture PR state, keyed by head branch: a MERGED and a CLOSED PR.
 	old := ghPRSource
 	ghPRSource = func(string) (map[string][]prInfo, error) {
 		return map[string][]prInfo{
-			"feat/squashed": {{Number: 7, State: "MERGED", HeadRef: "feat/squashed", HeadRefOID: squashedTip}},
+			"feat/squashed":  {{Number: 7, State: "MERGED", HeadRef: "feat/squashed", HeadRefOID: squashedTip}},
+			"feat/abandoned": {{Number: 8, State: "CLOSED", HeadRef: "feat/abandoned", HeadRefOID: abandonedTip}},
 		}, nil
 	}
 	t.Cleanup(func() { ghPRSource = old })
-	_ = mergedTip
 	return proj
 }
 
@@ -201,6 +211,97 @@ func TestPrune_BeyondMergedHeadKept(t *testing.T) {
 	}
 	if _, ok := pruneGitMay(proj, "rev-parse", "-q", "--verify", "refs/heads/feat/squashed"); !ok {
 		t.Fatalf("branch with commits BEYOND a merged head must never be pruned:\n%s", msg)
+	}
+}
+
+// TestPrune_IncludeClosedReapsAbandoned proves the include_closed opt-in reaps a
+// CLOSED-PR worktree/branch (tip contained in the closed head) — and that WITHOUT
+// the flag the same branch/worktree survives.
+func TestPrune_IncludeClosedReapsAbandoned(t *testing.T) {
+	// Without the flag: the abandoned branch + worktree survive.
+	proj := newPruneProject(t)
+	st, msg := runMaintenanceVerbIn(proj, "prune", map[string]any{"mode": "prune"})
+	if st != spec.StatusPass {
+		t.Fatalf("status: %s: %s", st, msg)
+	}
+	if _, ok := pruneGitMay(proj, "rev-parse", "-q", "--verify", "refs/heads/feat/abandoned"); !ok {
+		t.Fatalf("CLOSED-PR branch must survive WITHOUT include_closed:\n%s", msg)
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".worktrees", "cc-abandoned", "proj", ".git")); err != nil {
+		t.Fatalf("CLOSED-PR worktree must survive WITHOUT include_closed: %v", err)
+	}
+
+	// With the flag: the abandoned branch + worktree are reaped.
+	proj2 := newPruneProject(t)
+	st, msg = runMaintenanceVerbIn(proj2, "prune", map[string]any{"mode": "prune", "include_closed": true})
+	if st != spec.StatusPass {
+		t.Fatalf("status: %s: %s", st, msg)
+	}
+	if _, ok := pruneGitMay(proj2, "rev-parse", "-q", "--verify", "refs/heads/feat/abandoned"); ok {
+		t.Fatalf("CLOSED-PR branch must be reaped WITH include_closed:\n%s", msg)
+	}
+	if _, err := os.Stat(filepath.Join(proj2, ".worktrees", "cc-abandoned", "proj")); err == nil {
+		t.Fatalf("CLOSED-PR worktree must be reaped WITH include_closed:\n%s", msg)
+	}
+}
+
+// TestPrune_UntrackedForceDiscardsDisclosed proves the force path: a merged
+// worktree carrying an UNTRACKED file is reaped (git refuses without --force),
+// the untracked file is discarded, and the report DISCLOSES the discard count.
+func TestPrune_UntrackedForceDiscardsDisclosed(t *testing.T) {
+	proj := newPruneProject(t)
+	wtMerged := filepath.Join(proj, ".worktrees", "aa-merged", "proj")
+	writeFile(t, filepath.Join(wtMerged, "junk.txt"), "untracked leftover")
+
+	st, msg := runMaintenanceVerbIn(proj, "prune", map[string]any{"mode": "prune"})
+	if st != spec.StatusPass {
+		t.Fatalf("status: %s: %s", st, msg)
+	}
+	if _, err := os.Stat(wtMerged); err == nil {
+		t.Fatalf("merged worktree with untracked files must still be reaped:\n%s", msg)
+	}
+	if !strings.Contains(msg, "discards 1 untracked entry") {
+		t.Fatalf("report must DISCLOSE the untracked discard:\n%s", msg)
+	}
+}
+
+// TestPrune_ModifiedTrackedSkipped proves a merged worktree with a MODIFIED tracked
+// file is skipped (never destroyed), while its branch (proven merged) still reaps.
+func TestPrune_ModifiedTrackedSkipped(t *testing.T) {
+	proj := newPruneProject(t)
+	wtMerged := filepath.Join(proj, ".worktrees", "aa-merged", "proj")
+	wtMergedDir := filepath.Join(proj, ".worktrees", "aa-merged", "proj", "f")
+	writeFile(t, wtMergedDir, "locally modified tracked content")
+
+	st, msg := runMaintenanceVerbIn(proj, "prune", map[string]any{"mode": "prune"})
+	if st != spec.StatusPass {
+		t.Fatalf("status: %s: %s", st, msg)
+	}
+	if _, err := os.Stat(wtMerged); err != nil {
+		t.Fatalf("worktree with a modified tracked file must NOT be removed: %v", err)
+	}
+	if !strings.Contains(msg, "modified tracked files") {
+		t.Fatalf("report must name the modified-tracked skip:\n%s", msg)
+	}
+}
+
+// TestPrune_DetachedWorktreeSkipped proves a merged branch's worktree left in
+// DETACHED HEAD is skipped (no branch to prove merged), never force-removed.
+func TestPrune_DetachedWorktreeSkipped(t *testing.T) {
+	proj := newPruneProject(t)
+	wtMerged := filepath.Join(proj, ".worktrees", "aa-merged", "proj")
+	// Detach the worktree.
+	pruneGit(t, wtMerged, "checkout", "--quiet", "--detach", "HEAD")
+
+	st, msg := runMaintenanceVerbIn(proj, "prune", map[string]any{"mode": "prune"})
+	if st != spec.StatusPass {
+		t.Fatalf("status: %s: %s", st, msg)
+	}
+	if _, err := os.Stat(wtMerged); err != nil {
+		t.Fatalf("detached-HEAD worktree must be skipped: %v", err)
+	}
+	if !strings.Contains(msg, "detached HEAD") {
+		t.Fatalf("report must name the detached-HEAD skip:\n%s", msg)
 	}
 }
 
