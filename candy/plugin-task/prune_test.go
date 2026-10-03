@@ -43,10 +43,12 @@ func pruneGitMay(dir string, args ...string) (string, bool) {
 //   - feat/merged: committed onto main (ancestor of origin/main) — prunable
 //   - feat/squashed: its own commit NOT on main, but a MERGED PR head == its tip
 //     (the squash-merge case git ancestry cannot see) — prunable via gh
+//   - feat/abandoned: its own commit NOT on main, a CLOSED PR head == its tip
 //   - feat/wip: its own commit, no PR, beyond main — NEVER prunable
 //
-// It also creates two linked worktrees under .worktrees/: one on feat/merged
-// (prunable), one on feat/wip (kept). Returns the project dir.
+// It also creates linked worktrees under .worktrees/ and a checked-out SUBMODULE
+// (`sub`) whose own worktree + branch are prunable, so pruneRepos/Pass 1/Pass 2 all
+// run across the project root AND the submodule. Returns the project dir.
 func newPruneProject(t *testing.T) string {
 	t.Helper()
 	base := t.TempDir()
@@ -99,6 +101,38 @@ func newPruneProject(t *testing.T) string {
 	// A worktree on feat/abandoned, so the closed arm is exercised for BOTH kinds.
 	wtAbandoned := filepath.Join(proj, ".worktrees", "cc-abandoned", "proj")
 	pruneGit(t, proj, "worktree", "add", "-q", wtAbandoned, "feat/abandoned")
+
+	// --- a checked-out SUBMODULE with its own merged worktree + branch, so
+	// pruneRepos/Pass 1/Pass 2 exercise the submodule loop (not just the root). ---
+	subsrc := filepath.Join(base, "subsrc")
+	pruneGit(t, base, "init", "-q", "-b", "main", "subsrc")
+	writeFile(t, filepath.Join(subsrc, "g"), "sub")
+	pruneGit(t, subsrc, "add", "-A")
+	pruneGit(t, subsrc, "commit", "-qm", "sub base")
+	// A merged branch in the submodule (ancestor of its origin/main).
+	suborigin := filepath.Join(base, "suborigin.git")
+	pruneGit(t, base, "init", "-q", "--bare", "suborigin.git")
+	pruneGit(t, subsrc, "remote", "add", "origin", suborigin)
+	pruneGit(t, subsrc, "push", "-q", "origin", "main")
+	pruneGit(t, subsrc, "fetch", "-q", "origin")
+	pruneGit(t, subsrc, "remote", "set-head", "origin", "main")
+	pruneGit(t, subsrc, "branch", "feat/sub-merged", "main")
+	// Register `sub` as a submodule of proj and check it out.
+	pruneGit(t, proj, "config", "-f", ".gitmodules",
+		"submodule.sub.path", "sub")
+	pruneGit(t, proj, "config", "-f", ".gitmodules",
+		"submodule.sub.url", subsrc)
+	pruneGit(t, proj, "add", ".gitmodules")
+	pruneGit(t, proj, "commit", "-qm", "add submodule")
+	pruneGit(t, proj, "-c", "protocol.file.allow=always",
+		"submodule", "add", "-q", subsrc, "sub")
+	pruneGit(t, proj, "-c", "protocol.file.allow=always",
+		"submodule", "update", "--init", "sub")
+	// A merged worktree of the SUBMODULE, in the umbrella layout
+	// (<umbrella>/.worktrees/<slug>/<sub>) — listed by the submodule's `worktree
+	// list` AND within the project's .worktrees/ root.
+	subWtMerged := filepath.Join(proj, ".worktrees", "dd-sub", "sub")
+	pruneGit(t, filepath.Join(proj, "sub"), "worktree", "add", "-q", subWtMerged, "feat/sub-merged")
 
 	// Fixture PR state, keyed by head branch: a MERGED and a CLOSED PR.
 	old := ghPRSource
@@ -334,6 +368,77 @@ func TestPrune_UnknownModeFails(t *testing.T) {
 	if st != spec.StatusFail {
 		t.Fatalf("unknown mode must fail, got %s", st)
 	}
+}
+
+// TestPrune_SubmoduleSwept proves the submodule loop in pruneRepos/Pass 1/Pass 2 is
+// real: a merged worktree + branch of a CHECKED-OUT SUBMODULE is reaped, while the
+// project-root merged set is reaped too. Deleting the submodule loop would leave
+// this test red.
+func TestPrune_SubmoduleSwept(t *testing.T) {
+	proj := newPruneProject(t)
+	subPath := filepath.Join(proj, "sub")
+	subWt := filepath.Join(proj, ".worktrees", "dd-sub", "sub")
+
+	st, msg := runMaintenanceVerbIn(proj, "prune", map[string]any{"mode": "prune"})
+	if st != spec.StatusPass {
+		t.Fatalf("status: %s: %s", st, msg)
+	}
+	// The submodule's merged worktree is gone.
+	if _, err := os.Stat(subWt); err == nil {
+		t.Fatalf("submodule merged worktree must be reaped:\n%s", msg)
+	}
+	// The submodule's merged branch is gone.
+	if _, ok := pruneGitMay(subPath, "rev-parse", "-q", "--verify", "refs/heads/feat/sub-merged"); ok {
+		t.Fatalf("submodule merged branch must be reaped:\n%s", msg)
+	}
+	// The submodule still exists and is intact.
+	if _, err := os.Stat(filepath.Join(subPath, "g")); err != nil {
+		t.Fatalf("submodule must remain intact: %v", err)
+	}
+}
+
+// TestGHListPRsForDir_Live exercises the REAL gh shell-out / URL->slug / JSON-decode
+// / branch-keying path (ghListPRsForDir) against the actual opencharly/plugin-task
+// repo. R7a: LIVE against the real service, or SKIP cleanly when `gh` is
+// unauthenticated — never a fake of the boundary.
+func TestGHListPRsForDir_Live(t *testing.T) {
+	if _, err := exec.LookPath("gh"); err != nil {
+		t.Skip("gh not on PATH — skipping the live PR-state boundary test")
+	}
+	if err := exec.Command("gh", "auth", "status").Run(); err != nil {
+		t.Skip("gh not authenticated — skipping the live PR-state boundary test")
+	}
+	// The module lives inside the plugin-task repo; resolve the repo root.
+	root, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Skipf("not in a git checkout: %v", err)
+	}
+	repoRoot := strings.TrimSpace(string(root))
+	url, err := exec.Command("git", "-C", repoRoot, "config", "--get", "remote.origin.url").Output()
+	if err != nil || !strings.Contains(string(url), "github.com/opencharly/plugin-task") {
+		t.Skipf("not the plugin-task checkout (origin=%q)", strings.TrimSpace(string(url)))
+	}
+	byBranch, err := ghListPRsForDir(repoRoot)
+	if err != nil {
+		t.Fatalf("ghListPRsForDir: %v", err)
+	}
+	// PR #3 (feat/generic-maintenance-verbs) is MERGED in this repo — the real
+	// service must return it, keyed by its head branch.
+	got := byBranch["feat/generic-maintenance-verbs"]
+	if len(got) == 0 {
+		t.Fatalf("expected the real gh layer to return feat/generic-maintenance-verbs; keys=%v", keysOf(byBranch))
+	}
+	if got[0].State != "MERGED" || got[0].HeadRefOID == "" {
+		t.Fatalf("unexpected PR record: %+v", got[0])
+	}
+}
+
+func keysOf(m map[string][]prInfo) []string {
+	var ks []string
+	for k := range m {
+		ks = append(ks, k)
+	}
+	return ks
 }
 
 // TestNormalizeGitHubSlug covers the remote-URL -> owner/repo translation.
