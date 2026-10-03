@@ -272,6 +272,14 @@ bump-all:
       - run: bump
         git-submodules: {mode: bump}
         context: [deploy]
+status-all:
+  task:
+    description: list the pins (an uninitialized submodule must not walk up)
+    dir: .
+    plan:
+      - check: the pin table reports the submodule
+        git-submodules: {mode: status}
+        context: [runtime]
 YML
 umb_head_before="$(git -C "$UNI" rev-parse HEAD)"
 umb_branch_before="$(git -C "$UNI" rev-parse --abbrev-ref HEAD)"
@@ -283,6 +291,20 @@ umb_branch_after="$(git -C "$UNI" rev-parse --abbrev-ref HEAD)"
 [ "$umb_head_before" = "$umb_head_after" ] || { echo "FAIL: the umbrella HEAD moved (walk-up detach): $umb_head_before -> $umb_head_after" >&2; exit 1; }
 [ "$umb_branch_before" = "$umb_branch_after" ] || { echo "FAIL: the umbrella branch changed (walk-up detach): $umb_branch_before -> $umb_branch_after" >&2; exit 1; }
 echo "   uninitialized-submodule bump failed loud; umbrella untouched ($umb_branch_before @ ${umb_head_before:0:9})"
+
+echo "== verb:git-submodules status (uninitialized submodule -> '- (uninitialized)', never the umbrella HEAD) =="
+# charly#768: the status read must go through submoduleAt too. Pre-fix, `git -C
+# <empty-dir> rev-parse --short HEAD` walked up and printed the UMBRELLA's HEAD as the
+# submodule's pin. Assert the marker is present AND the umbrella's own short HEAD is
+# NOT reported as the pin.
+status_out="$(cd "$UNI" && "$CH" task status-all)"
+echo "$status_out" | grep -q '0 failed' || { echo "FAIL: status did not run" >&2; echo "$status_out"; exit 1; }
+echo "$status_out" | grep -q -- '- (uninitialized)' || { echo "FAIL: uninitialized submodule not marked in status" >&2; echo "$status_out"; exit 1; }
+umb_short="$(git -C "$UNI" rev-parse --short HEAD)"
+if echo "$status_out" | grep -q "$umb_short"; then
+  echo "FAIL: status printed the umbrella HEAD ($umb_short) as a submodule pin (walk-up regression)" >&2; echo "$status_out"; exit 1
+fi
+echo "   status reported '- (uninitialized)'; umbrella HEAD ($umb_short) not leaked as a pin"
 
 echo "== verb:git-submodules bump ORDER (pinned_from is itself rolled first) =="
 . "$FIX/order"; . "$FIX/leafshas"

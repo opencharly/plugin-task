@@ -61,6 +61,40 @@ func TestGitSubmodules_Status(t *testing.T) {
 	}
 }
 
+// TestGitSubmodules_StatusUninitializedMarker proves the status arm added for
+// charly#768: a present-but-UNINITIALIZED submodule must be reported as
+// `- (uninitialized)`, NOT via git's walk-up to the superproject. This test FAILS on
+// the pre-fix code, which ran `git -C <empty-dir> rev-parse --short HEAD` — for an
+// empty dir that walks up and prints the UMBRELLA's own HEAD as the submodule's pin.
+func TestGitSubmodules_StatusUninitializedMarker(t *testing.T) {
+	dir := t.TempDir()
+	run := gitRepo(t, dir)
+	writeFile(t, filepath.Join(dir, ".gitmodules"),
+		"[submodule \"target\"]\n\tpath = target\n\turl = https://example.invalid/target.git\n\tbranch = main\n")
+	writeFile(t, filepath.Join(dir, "README"), "x")
+	run("add", "-A")
+	run("commit", "-qm", "init")
+	// Record the gitlink for `target`, then leave its DIRECTORY present but EMPTY
+	// (no `.git`) — the exact post-`git worktree add` state.
+	run("update-index", "--add", "--cacheinfo", "160000,"+run("rev-parse", "HEAD")+",target")
+	run("commit", "-qm", "gitlink")
+	umbShort := run("rev-parse", "--short", "HEAD")
+	if err := os.MkdirAll(filepath.Join(dir, "target"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	st, msg := runMaintenanceVerbIn(dir, "git-submodules", map[string]any{"mode": "status"})
+	if st != spec.StatusPass {
+		t.Fatalf("status: %s: %s", st, msg)
+	}
+	if !strings.Contains(msg, "- (uninitialized)") {
+		t.Fatalf("an uninitialized submodule must be marked '- (uninitialized)', got:\n%s", msg)
+	}
+	if strings.Contains(msg, umbShort) {
+		t.Fatalf("status printed the UMBRELLA's HEAD (%s) as a submodule pin — the walk-up regression:\n%s", umbShort, msg)
+	}
+}
+
 // TestGitSubmodules_VerifyPolicyB proves the policy-B comparison passes when the
 // umbrella gitlink equals the pinned repo's twin, and fails when the twin is
 // MISSING (never a vacuous empty==empty pass). It uses a real gitlink written
