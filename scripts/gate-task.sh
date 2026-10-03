@@ -249,6 +249,63 @@ verify_out="$("$CH" task pins-verify)"; echo "$verify_out" | grep -q '0 failed' 
 echo "== verb:git-submodules verify (missing twin -> must FAIL loudly, never vacuous) =="
 if "$CH" task missing-pin; then echo "FAIL: a missing gitlink must fail verify" >&2; exit 1; fi
 
+echo "== verb:git-submodules bump (uninitialized submodule -> must FAIL loudly, never walk up) =="
+# charly#768: a present-but-uninitialized submodule dir must NOT be operated on via
+# git's walk-up to the umbrella. Build a fixture with an uninit submodule, record the
+# UMBRELLA's HEAD, run bump, and assert (a) it fails and (b) the umbrella is untouched.
+UNI="$WORK/uninit"; mkdir -p "$UNI"
+(
+  cd "$UNI" && git init -q -b main
+  echo u > u.txt && git add -A && G commit -qm u
+  printf '[submodule "gap"]\n\tpath = gap\n\turl = %s\n\tbranch = main\n' "$FIX/subsrc" > .gitmodules
+  git add .gitmodules && G commit -qm gm
+  git update-index --add --cacheinfo "160000,$C2,gap" && G commit -qm pin
+  mkdir -p gap   # present-but-UNINITIALIZED
+)
+cat > "$UNI/charly.yml" <<'YML'
+version: 2026.261.1747
+bump-all:
+  task:
+    description: bump over a set containing an uninitialized submodule
+    dir: .
+    plan:
+      - run: bump
+        git-submodules: {mode: bump}
+        context: [deploy]
+status-all:
+  task:
+    description: list the pins (an uninitialized submodule must not walk up)
+    dir: .
+    plan:
+      - check: the pin table reports the submodule
+        git-submodules: {mode: status}
+        context: [runtime]
+YML
+umb_head_before="$(git -C "$UNI" rev-parse HEAD)"
+umb_branch_before="$(git -C "$UNI" rev-parse --abbrev-ref HEAD)"
+if (cd "$UNI" && "$CH" task bump-all); then
+  echo "FAIL: bump over an uninitialized submodule must FAIL LOUD" >&2; exit 1
+fi
+umb_head_after="$(git -C "$UNI" rev-parse HEAD)"
+umb_branch_after="$(git -C "$UNI" rev-parse --abbrev-ref HEAD)"
+[ "$umb_head_before" = "$umb_head_after" ] || { echo "FAIL: the umbrella HEAD moved (walk-up detach): $umb_head_before -> $umb_head_after" >&2; exit 1; }
+[ "$umb_branch_before" = "$umb_branch_after" ] || { echo "FAIL: the umbrella branch changed (walk-up detach): $umb_branch_before -> $umb_branch_after" >&2; exit 1; }
+echo "   uninitialized-submodule bump failed loud; umbrella untouched ($umb_branch_before @ ${umb_head_before:0:9})"
+
+echo "== verb:git-submodules status (uninitialized submodule -> '- (uninitialized)', never the umbrella HEAD) =="
+# charly#768: the status read must go through submoduleAt too. Pre-fix, `git -C
+# <empty-dir> rev-parse --short HEAD` walked up and printed the UMBRELLA's HEAD as the
+# submodule's pin. Assert the marker is present AND the umbrella's own short HEAD is
+# NOT reported as the pin.
+status_out="$(cd "$UNI" && "$CH" task status-all)"
+echo "$status_out" | grep -q '0 failed' || { echo "FAIL: status did not run" >&2; echo "$status_out"; exit 1; }
+echo "$status_out" | grep -q -- '- (uninitialized)' || { echo "FAIL: uninitialized submodule not marked in status" >&2; echo "$status_out"; exit 1; }
+umb_short="$(git -C "$UNI" rev-parse --short HEAD)"
+if echo "$status_out" | grep -q "$umb_short"; then
+  echo "FAIL: status printed the umbrella HEAD ($umb_short) as a submodule pin (walk-up regression)" >&2; echo "$status_out"; exit 1
+fi
+echo "   status reported '- (uninitialized)'; umbrella HEAD ($umb_short) not leaked as a pin"
+
 echo "== verb:git-submodules bump ORDER (pinned_from is itself rolled first) =="
 . "$FIX/order"; . "$FIX/leafshas"
 (cd "$FIX/umb2" && "$CH" task order-bump) | grep -q '0 failed' || { echo "FAIL: order-bump did not run" >&2; exit 1; }
