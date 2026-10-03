@@ -266,7 +266,9 @@ func TestPrune_UntrackedForceDiscardsDisclosed(t *testing.T) {
 }
 
 // TestPrune_ModifiedTrackedSkipped proves a merged worktree with a MODIFIED tracked
-// file is skipped (never destroyed), while its branch (proven merged) still reaps.
+// file is skipped (never destroyed). The skipped worktree still has its branch
+// checked out, so Pass 2 sees the branch in-use and leaves it too — the branch is
+// NOT reaped while its worktree survives.
 func TestPrune_ModifiedTrackedSkipped(t *testing.T) {
 	proj := newPruneProject(t)
 	wtMerged := filepath.Join(proj, ".worktrees", "aa-merged", "proj")
@@ -302,6 +304,26 @@ func TestPrune_DetachedWorktreeSkipped(t *testing.T) {
 	}
 	if !strings.Contains(msg, "detached HEAD") {
 		t.Fatalf("report must name the detached-HEAD skip:\n%s", msg)
+	}
+}
+
+// TestPrune_CwdWorktreeSkipped proves the "is cwd" guard: a merged worktree the
+// process is STANDING INSIDE is skipped (never removed out from under the caller).
+func TestPrune_CwdWorktreeSkipped(t *testing.T) {
+	proj := newPruneProject(t)
+	wtMerged := filepath.Join(proj, ".worktrees", "aa-merged", "proj")
+	// Stand inside the merged worktree: the guard must skip it.
+	t.Chdir(wtMerged)
+
+	st, msg := runMaintenanceVerbIn(proj, "prune", map[string]any{"mode": "prune"})
+	if st != spec.StatusPass {
+		t.Fatalf("status: %s: %s", st, msg)
+	}
+	if _, err := os.Stat(wtMerged); err != nil {
+		t.Fatalf("the cwd worktree must NOT be removed: %v", err)
+	}
+	if !strings.Contains(msg, "(is cwd)") {
+		t.Fatalf("report must name the is-cwd skip:\n%s", msg)
 	}
 }
 
