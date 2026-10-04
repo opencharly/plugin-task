@@ -211,7 +211,16 @@ var verbResolverFor = func(ex *sdk.Executor) kit.VerbResolver {
 func newTaskRunner(ex *sdk.Executor, projDir string, t spec.Task, params map[string]string) (*kit.Runner, stdinCapture) {
 	env := workflowkit.MergedEnv(t, params)
 	env["TASK_DIR"] = workflowkit.ResolveTaskDir(projDir, t.Dir, env)
-	stdin := captureStdin(env)
+	// Stdin is read ONLY when the plan declares it consumes it. The read is bounded by
+	// EOF alone, so an inherited OPEN pipe — a harness, `bash -c`, any parent that
+	// neither writes nor closes — would block the walk forever, and `charly task` would
+	// hang where it used to return instantly. A task that references neither var cannot
+	// observe the bytes, so not reading is unobservable to it and removes that hang
+	// class entirely. See taskConsumesStdin.
+	var stdin stdinCapture
+	if taskConsumesStdin(t) {
+		stdin = captureStdin(env)
+	}
 
 	// The plan walk requires a Verbs resolver; command:task is compiled-in so the
 	// reverse-channel executor is always present. A nil ex (out-of-process CliMain)
@@ -239,9 +248,11 @@ const maxStdinBytes = 1 << 20
 
 // stdinCapture is the task's piped stdin exposed to its steps: TASK_STDIN carries the
 // bytes and TASK_STDIN_FILE names a temp file holding them, so a step — and a lobster
-// `run:` step above it — can read `$TASK_STDIN` / `$TASK_STDIN_FILE`. file is "" when
-// stdin is a terminal, in which case NEITHER var is defined: an interactive `charly
-// task` must never block on (or consume) the terminal.
+// `run:` step above it — can read `$TASK_STDIN` / `$TASK_STDIN_FILE`. file is "" when no
+// capture happened, which is the case when stdin is a terminal OR when the plan
+// references neither var (taskConsumesStdin): an interactive `charly task` must never
+// block on (or consume) the terminal, and a task that never looks at stdin must never
+// block on an inherited open pipe either.
 type stdinCapture struct {
 	file      string
 	truncated bool
@@ -255,11 +266,37 @@ func (c stdinCapture) cleanup() {
 	}
 }
 
+// taskConsumesStdin reports whether ANY step of the plan references TASK_STDIN or
+// TASK_STDIN_FILE — the only two names under which a step can observe the piped bytes.
+//
+// This is the gate on the stdin READ, not on the vars' values: a task that names
+// neither can never see the bytes, so reading them buys nothing and costs a hang. The
+// read is bounded by the writer's EOF, and an inherited OPEN pipe (a harness, a shell
+// script, `bash -c 'charly task …'`) never sends that EOF — so an unconditional read
+// makes `charly task` block forever where it previously returned at once. Gating on the
+// plan's own declaration keeps the exposure for the tasks that ask for it and leaves
+// every other invocation as instantaneous as it was before stdin capture existed.
+//
+// The whole plan is scanned rather than an enumerated field list: the walk expands
+// ${NAME} over every string field of every step (kit.ExpandOpVars), and re-stating that
+// field list here would be a second copy of it to drift (R3).
+func taskConsumesStdin(t spec.Task) bool {
+	b, err := json.Marshal(t.Plan)
+	if err != nil {
+		// A plan that will not marshal cannot have declared the vars, and the walk
+		// reports the real error; never make this path read stdin.
+		return false
+	}
+	// One substring covers both names: TASK_STDIN and TASK_STDIN_FILE.
+	return strings.Contains(string(b), "TASK_STDIN")
+}
+
 // captureStdin reads stdin when it is NOT a terminal and adds TASK_STDIN /
 // TASK_STDIN_FILE to env. Both vars are ALWAYS defined in that mode — possibly empty
 // (empty stdin yields TASK_STDIN="" and a TASK_STDIN_FILE naming an empty file) — so a
 // workflow step can branch on their PRESENCE. When stdin IS a terminal it is left
-// unread and the vars stay absent.
+// unread and the vars stay absent. Callers reach this only through taskConsumesStdin,
+// so the read happens exactly when a step can observe its result.
 func captureStdin(env map[string]string) stdinCapture {
 	if stdinIsTerminal() {
 		return stdinCapture{}

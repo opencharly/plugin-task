@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/term"
 
@@ -120,8 +121,10 @@ func TestRunTask_RecordsStdinTruncation(t *testing.T) {
 		_ = w.Close()
 	}()
 
+	// The plan must reference TASK_STDIN: stdin is read only for a task that can
+	// observe it (taskConsumesStdin), and this test is about a task that does.
 	ts := &taskSet{dir: t.TempDir(), tasks: map[string]spec.Task{
-		"t": {Description: "d", Plan: []spec.Step{{Run: "x", Op: spec.Op{Plugin: "command", PluginInput: map[string]any{"command": "true"}}}}},
+		"t": {Description: "d", Plan: []spec.Step{{Run: "x", Op: spec.Op{Plugin: "command", PluginInput: map[string]any{"command": "printf %s \"$TASK_STDIN\" | wc -c"}}}}},
 	}}
 	res, err := runTask(context.Background(), nil, ts, "t", nil, false, false)
 	os.Stdin = old
@@ -130,6 +133,54 @@ func TestRunTask_RecordsStdinTruncation(t *testing.T) {
 	}
 	if len(res.Steps) == 0 || !strings.Contains(res.Steps[0].Result.Message, "TASK_STDIN truncated") {
 		t.Fatalf("stdin truncation must be recorded on a step Message, got %+v", res.Steps)
+	}
+}
+
+// TestTaskConsumesStdin_GatesTheRead proves the read happens exactly when a step can
+// observe it. A plan naming neither var reads NOTHING — proved against an OPEN pipe
+// whose writer is never closed: an unconditional read would block here forever, so the
+// test completing at all IS the assertion (it is bounded by the go test timeout).
+func TestTaskConsumesStdin_GatesTheRead(t *testing.T) {
+	step := func(cmd string) spec.Task {
+		return spec.Task{Description: "d", Plan: []spec.Step{{Run: "x", Op: spec.Op{Plugin: "command", PluginInput: map[string]any{"command": cmd}}}}}
+	}
+	for _, tc := range []struct {
+		name string
+		task spec.Task
+		want bool
+	}{
+		{"TASK_STDIN", step("cat \"$TASK_STDIN_FILE\""), true},
+		{"TASK_STDIN_FILE", step("test -f \"$TASK_STDIN_FILE\""), true},
+		{"neither", step("echo hello"), false},
+		{"empty plan", spec.Task{Description: "d"}, false},
+	} {
+		if got := taskConsumesStdin(tc.task); got != tc.want {
+			t.Errorf("taskConsumesStdin(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+
+	// The gate must prevent the READ, not merely the vars' values: with a never-closed
+	// pipe as stdin, an ungated call hangs. This is the regression the gate exists for.
+	old := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = w.Close(); _ = r.Close() }()
+	os.Stdin = r
+	defer func() { os.Stdin = old }()
+
+	noStdin := step("echo hello")
+	done := make(chan stdinCapture, 1)
+	go func() {
+		_, cap := newTaskRunner(nil, t.TempDir(), noStdin, nil)
+		done <- cap
+	}()
+	select {
+	case cap := <-done:
+		cap.cleanup()
+	case <-time.After(10 * time.Second):
+		t.Fatal("a plan naming neither TASK_STDIN nor TASK_STDIN_FILE must NOT read stdin — the run blocked on an open pipe")
 	}
 }
 
