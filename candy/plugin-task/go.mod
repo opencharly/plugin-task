@@ -3,8 +3,8 @@ module github.com/opencharly/plugin-task/candy/plugin-task
 go 1.26.4
 
 require (
-	github.com/opencharly/sdk v0.2026276.1744
-	github.com/opencharly/spec v0.2026276.0
+	github.com/opencharly/sdk v0.2026276.1822
+	github.com/opencharly/spec v0.2026276.1636
 	golang.org/x/term v0.45.0
 )
 
