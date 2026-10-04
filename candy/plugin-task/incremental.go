@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/opencharly/sdk/workflowkit"
 	"github.com/opencharly/spec/spec"
 )
 
@@ -20,7 +21,7 @@ import (
 //
 // An absent signal is not "up to date" (a task with no status/sources always runs).
 func taskUpToDate(ctx context.Context, dir string, t spec.Task, params map[string]string) (bool, string) {
-	env := mergedEnv(t, params)
+	env := workflowkit.MergedEnv(t, params)
 	if len(t.Status) > 0 {
 		allOK := true
 		for _, cmd := range t.Status {

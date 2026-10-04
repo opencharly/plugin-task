@@ -3,8 +3,8 @@ module github.com/opencharly/plugin-task/candy/plugin-task
 go 1.26.4
 
 require (
-	github.com/opencharly/sdk v0.2026266.1111
-	github.com/opencharly/spec v0.2026267.834
+	github.com/opencharly/sdk v0.2026276.1822
+	github.com/opencharly/spec v0.2026276.1636
 	golang.org/x/term v0.45.0
 )
 
@@ -12,7 +12,9 @@ require (
 	cuelang.org/go v0.16.1 // indirect
 	github.com/alecthomas/kong v1.15.0 // indirect
 	github.com/cockroachdb/apd/v3 v3.2.1 // indirect
+	github.com/emicklei/dot v1.11.0 // indirect
 	github.com/emicklei/proto v1.14.3 // indirect
+	github.com/expr-lang/expr v1.17.8 // indirect
 	github.com/fatih/color v1.15.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -27,6 +29,10 @@ require (
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/protocolbuffers/txtpbfmt v0.0.0-20260217160748-a481f6a22f94 // indirect
+	github.com/robfig/cron/v3 v3.0.1 // indirect
+	github.com/tidwall/gjson v1.19.0 // indirect
+	github.com/tidwall/match v1.1.1 // indirect
+	github.com/tidwall/pretty v1.2.1 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
