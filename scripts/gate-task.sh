@@ -7,23 +7,65 @@
 # way: build a real charly binary with candy/plugin-task compiled IN, then drive
 # `charly task` and each maintenance verb end to end.
 #
-# The charly checkout is pinned to v2026.267.2313 — the tag that compiles
-# candy/plugin-task into the binary. A LOCAL `-replace` points that compiled-in
-# module at THIS working tree, so the artifact under test IS the changed source.
-# (v2026.267.2313 predates the maintenance verbs, so without the replace the verb
-# words would not resolve — exactly the failure this gate would catch.)
+# The charly checkout is built from CHARLY_REF, defaulting to `main` — the ref
+# that ADVANCES WITH the plugin source. A pinned tag cannot work here: the LOCAL
+# `-replace` below makes Go read THIS working tree's go.mod, whose `require`s
+# (github.com/opencharly/sdk, spec) are same-day, while a tag's OTHER compiled-in
+# plugins are frozen at the tag's vintage. MVS takes the max, so the working
+# tree's sdk/spec win and the tag's sibling plugins — built against the older
+# kit/deploykit APIs — stop compiling (`not enough arguments in call to
+# kit.ScaffoldCandy`, `deploykit.ResolveContainer`, …). Measured on this repo:
+# v2026.267.2313 (pinning sdk v0.2026266.1111 against the working tree's
+# v0.2026276.1822) fails to build at all; the identical gate at a ref whose own
+# pins LEAD the working tree's builds and runs every verb. `main` gives that
+# ordering by construction, and the assertion below fails LOUDLY, naming the
+# module and both versions, if it ever lapses (charly lags the plugin's bump).
 #
 # Usage: scripts/gate-task.sh   (from the repo root; needs git, go, a network)
+#        CHARLY_REF=<tag|sha> scripts/gate-task.sh   (reproduce a specific vintage)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLUGIN_DIR="$ROOT/candy/plugin-task"
-CHARLY_TAG="${CHARLY_TAG:-v2026.267.2313}"
+CHARLY_REF="${CHARLY_REF:-main}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/plugin-task-gate.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "== fetching charly $CHARLY_TAG (compiles candy/plugin-task in) =="
-git clone --depth 1 --branch "$CHARLY_TAG" https://github.com/opencharly/charly.git "$WORK/charly" 2>&1 | tail -1
+echo "== fetching charly $CHARLY_REF (compiles candy/plugin-task in) =="
+git clone --depth 1 --branch "$CHARLY_REF" https://github.com/opencharly/charly.git "$WORK/charly" 2>&1 | tail -1
+
+# --- the coherence gate: charly's own pins must LEAD the working tree's ---------
+# The `-replace` below puts the working tree's requires into the module graph, and
+# MVS takes the max, so a charly ref that lags raises sdk/spec past the sibling
+# plugins' APIs and the build dies in plugin-box/plugin-build/plugin-cmd, far
+# from the cause. Assert the ordering here — BEFORE the build — so a lapse names
+# itself. CalVer components are NOT zero-padded ("0.2026277.352" vs
+# "0.2026276.1822"), so the three dotted parts are compared numerically, never as
+# strings.
+mod_pin() { awk -v m="$2" '$1==m {print $2; exit}' "$1"; }
+calver_ge() { # $1 >= $2 ?
+  local -a hi lo
+  IFS=. read -ra hi <<<"${1#v}"
+  IFS=. read -ra lo <<<"${2#v}"
+  local i
+  for i in 0 1 2; do
+    (( 10#${hi[i]:-0} > 10#${lo[i]:-0} )) && return 0
+    (( 10#${hi[i]:-0} < 10#${lo[i]:-0} )) && return 1
+  done
+  return 0
+}
+for m in github.com/opencharly/sdk github.com/opencharly/spec; do
+  have="$(mod_pin "$WORK/charly/charly/go.mod" "$m")"
+  want="$(mod_pin "$PLUGIN_DIR/go.mod" "$m")"
+  calver_ge "$have" "$want" || {
+    echo "FAIL: charly $CHARLY_REF pins $m $have, but this working tree requires $want." >&2
+    echo "      The -replace puts the working tree's requires in the graph and MVS takes the" >&2
+    echo "      max, so $m would be raised past what $CHARLY_REF's other plugins were built" >&2
+    echo "      for. Re-run against a charly ref whose pins lead the working tree's (main" >&2
+    echo "      does, once charly has re-synced), or re-sync charly first." >&2
+    exit 1
+  }
+done
 
 export GOTMPDIR="${GOTMPDIR:-$(mktemp -d)}"
 export GOWORK=off
@@ -45,7 +87,6 @@ CH="$WORK/charly-bin"
 PROJ="$WORK/proj"
 mkdir -p "$PROJ"
 cat > "$PROJ/charly.yml" <<'YML'
-version: 2026.261.1747
 greet:
   task:
     description: greet the user
@@ -134,7 +175,6 @@ git add .gitmodules && G commit -qm branches
 git -c protocol.file.allow=always submodule update --init -q src target2
 
 cat > "$FIX/umb/charly.yml" <<'YML'
-version: 2026.261.1747
 pins-verify:
   task:
     description: verify policy B
@@ -212,7 +252,6 @@ YML
 # A second project exercising the LOAD-BEARING bump order (pinned_from is itself a
 # rolling stale submodule).
 cat > "$FIX/umb2/charly.yml" <<'YML'
-version: 2026.261.1747
 order-bump:
   task:
     description: bump target2 from src (which itself rolls first)
@@ -263,7 +302,6 @@ UNI="$WORK/uninit"; mkdir -p "$UNI"
   mkdir -p gap   # present-but-UNINITIALIZED
 )
 cat > "$UNI/charly.yml" <<'YML'
-version: 2026.261.1747
 bump-all:
   task:
     description: bump over a set containing an uninitialized submodule
@@ -356,7 +394,6 @@ mkdir -p "$PRUNE"
   git worktree add -q .worktrees/bb-wip feat/wip
 )
 cat > "$PRUNE/charly.yml" <<'YML'
-version: 2026.261.1747
 prune:
   task:
     description: reap merged-upstream worktrees and branches
@@ -373,4 +410,4 @@ prune_out="$(cd "$PRUNE" && "$CH" task prune)"; echo "$prune_out" | grep -q '0 f
 [ -d "$PRUNE/.worktrees/aa-merged" ] && { echo "FAIL: merged worktree survived prune" >&2; exit 1; }
 [ -f "$PRUNE/.worktrees/bb-wip/.git" ] || { echo "FAIL: unmerged worktree was removed" >&2; exit 1; }
 
-echo "gate-task: PASS — command:task + all five maintenance verbs executed live against charly $CHARLY_TAG"
+echo "gate-task: PASS — command:task + all five maintenance verbs executed live against charly $CHARLY_REF"
