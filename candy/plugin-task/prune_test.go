@@ -397,6 +397,210 @@ func TestPrune_SubmoduleSwept(t *testing.T) {
 	}
 }
 
+// newPruneProjectWithPopulatedSubmodule builds a project whose MERGED session
+// worktree contains an INITIALIZED submodule — the routine umbrella shape, since
+// reading a skill by path populates `marketplace` and a build populates `charly`.
+//
+// This is the fixture plugin-task#18 needed and never had: `git worktree remove`
+// refuses such a worktree even when it is CLEAN
+// (`fatal: working trees containing submodules cannot be moved or removed`), so
+// the pre-fix sweep — which forced only on untracked entries — failed the whole
+// step and never ran the Pass-2 branch reap.
+func newPruneProjectWithPopulatedSubmodule(t *testing.T) (proj, wt, subsrc string) {
+	t.Helper()
+	base := t.TempDir()
+	proj = filepath.Join(base, "proj")
+	pruneGit(t, base, "init", "-q", "-b", "main", "proj")
+	writeFile(t, filepath.Join(proj, "f"), "base")
+
+	// The submodule source, so `sub` has something real to check out.
+	subsrc = filepath.Join(base, "subsrc")
+	pruneGit(t, base, "init", "-q", "-b", "main", "subsrc")
+	writeFile(t, filepath.Join(subsrc, "g"), "sub")
+	pruneGit(t, subsrc, "add", "-A")
+	pruneGit(t, subsrc, "commit", "-qm", "sub base")
+
+	pruneGit(t, proj, "add", "-A")
+	pruneGit(t, proj, "commit", "-qm", "base")
+	origin := filepath.Join(base, "origin.git")
+	pruneGit(t, base, "init", "-q", "--bare", "origin.git")
+	pruneGit(t, proj, "remote", "add", "origin", origin)
+	pruneGit(t, proj, "push", "-q", "origin", "main")
+	pruneGit(t, proj, "fetch", "-q", "origin")
+	pruneGit(t, proj, "remote", "set-head", "origin", "main")
+
+	// Register + check out `sub`, then commit the gitlink so the worktree carries it.
+	pruneGit(t, proj, "-c", "protocol.file.allow=always", "submodule", "add", "-q", subsrc, "sub")
+	pruneGit(t, proj, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "sub")
+	pruneGit(t, proj, "add", "-A")
+	pruneGit(t, proj, "commit", "-qm", "add submodule")
+	pruneGit(t, proj, "push", "-q", "origin", "main")
+
+	// feat/merged is an ancestor of origin/main, so it is prunable by ancestry.
+	pruneGit(t, proj, "branch", "feat/merged", "main")
+	wt = filepath.Join(proj, ".worktrees", "aa-merged", "proj")
+	pruneGit(t, proj, "worktree", "add", "-q", wt, "feat/merged")
+	// Populate the submodule INSIDE the worktree — this is what makes git refuse.
+	pruneGit(t, wt, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "sub")
+
+	old := ghPRSource
+	ghPRSource = func(string) (map[string][]prInfo, error) { return nil, nil }
+	t.Cleanup(func() { ghPRSource = old })
+	return proj, wt, subsrc
+}
+
+// TestPrune_PopulatedSubmoduleWorktreeReaped is the plugin-task#18 regression: a
+// MERGED, CLEAN session worktree carrying an INITIALIZED submodule must be reaped,
+// and its branch freed by Pass 2. Pre-fix this failed the whole step (exit 128
+// from `git worktree remove`) and the branch survived.
+func TestPrune_PopulatedSubmoduleWorktreeReaped(t *testing.T) {
+	proj, wt, _ := newPruneProjectWithPopulatedSubmodule(t)
+
+	// Guard the premise: the worktree IS clean and DOES carry a populated submodule.
+	if out, _ := pruneGitMay(wt, "status", "--porcelain"); strings.TrimSpace(out) != "" {
+		t.Fatalf("premise broken: the worktree must be clean, got:\n%s", out)
+	}
+	if n := populatedSubmodules(wt); n != 1 {
+		t.Fatalf("premise broken: want 1 populated submodule, got %d", n)
+	}
+	// And git really does refuse it without force — the whole reason for the fix.
+	if out, ok := pruneGitMay(proj, "worktree", "remove", wt); ok {
+		t.Fatalf("premise broken: git accepted a submodule-bearing worktree removal:\n%s", out)
+	}
+
+	st, msg := runMaintenanceVerbIn(proj, "prune", map[string]any{"mode": "prune"})
+	if st != spec.StatusPass {
+		t.Fatalf("a clean merged worktree with a populated submodule must NOT fail the step: %s: %s", st, msg)
+	}
+	if _, err := os.Stat(wt); err == nil {
+		t.Fatalf("the submodule-bearing merged worktree must be reaped:\n%s", msg)
+	}
+	// Pass 2 must have run: the branch is freed.
+	if _, ok := pruneGitMay(proj, "rev-parse", "-q", "--verify", "refs/heads/feat/merged"); ok {
+		t.Fatalf("the branch must be reaped once its worktree is gone:\n%s", msg)
+	}
+	// The force is DISCLOSED, never silent.
+	if !strings.Contains(msg, "populated submodule") {
+		t.Fatalf("the report must DISCLOSE the populated-submodule force:\n%s", msg)
+	}
+}
+
+// TestPrune_UninitializedSubmoduleWorktreeReaped proves the fix does not over-force:
+// a worktree whose submodule is DECLARED but never initialized removes fine
+// (MEASURED), so it must be reaped WITHOUT being reported as a populated-submodule
+// force. Counting a '-' line would force a removal git never required.
+// pruneReportLineFor returns the report line naming target, or "" when the target
+// is absent from the report. The report is one line per target, so an assertion
+// about ONE worktree must read its OWN line — a whole-message `strings.Contains`
+// would match a sibling worktree's disclosure.
+func pruneReportLineFor(report, target string) string {
+	for _, line := range strings.Split(report, "\n") {
+		if strings.Contains(line, target) {
+			return line
+		}
+	}
+	return ""
+}
+
+// TestPrune_NeverInitializedSubmoduleWorktreeReaped proves the fix does not
+// over-force: a worktree whose submodule was NEVER initialized removes fine
+// (MEASURED), so it must be reaped WITHOUT a populated-submodule force on ITS OWN
+// report line. This is the arm the `modules/`-directory predicate exists to
+// separate from the deinitialized case.
+func TestPrune_NeverInitializedSubmoduleWorktreeReaped(t *testing.T) {
+	proj, _, _ := newPruneProjectWithPopulatedSubmodule(t)
+	// A second merged worktree on its own branch, with the submodule NOT checked out.
+	pruneGit(t, proj, "branch", "feat/merged2", "main")
+	wt2 := filepath.Join(proj, ".worktrees", "bb-merged2", "proj")
+	pruneGit(t, proj, "worktree", "add", "-q", wt2, "feat/merged2")
+
+	if n := populatedSubmodules(wt2); n != 0 {
+		t.Fatalf("premise broken: a never-initialized submodule must not count, got %d", n)
+	}
+	// git agrees it needs no force — the discriminating half of the predicate.
+	if out, ok := pruneGitMay(proj, "worktree", "remove", wt2); !ok {
+		t.Fatalf("premise broken: git refused a never-initialized submodule worktree:\n%s", out)
+	}
+	// Put it back (the probe above removed it) so prune has something to reap.
+	pruneGit(t, proj, "worktree", "add", "-q", wt2, "feat/merged2")
+
+	st, msg := runMaintenanceVerbIn(proj, "prune", map[string]any{"mode": "prune"})
+	if st != spec.StatusPass {
+		t.Fatalf("status: %s: %s", st, msg)
+	}
+	if _, err := os.Stat(wt2); err == nil {
+		t.Fatalf("the never-initialized worktree must be reaped:\n%s", msg)
+	}
+	line := pruneReportLineFor(msg, wt2)
+	if line == "" {
+		t.Fatalf("the report must carry a line for the reaped worktree:\n%s", msg)
+	}
+	if strings.Contains(line, "populated submodule") {
+		t.Fatalf("a NEVER-initialized submodule must not force on its own line:\n%s", line)
+	}
+}
+
+// TestPrune_DeinitializedSubmoduleWorktreeReaped pins the MEASURED subtlety that
+// forced the `modules/`-directory predicate: a submodule that was initialized and
+// then DEINITIALIZED still reports '-' from `git submodule status` (so it LOOKS
+// uninitialized) yet git STILL refuses to remove its worktree, because the gitdir
+// under `.git/worktrees/<name>/modules` survives `deinit`. A predicate built on
+// `submodule status`'s leading character would mis-classify this case and leave
+// plugin-task#18 live. The worktree must therefore still be reaped, and the force
+// disclosed.
+func TestPrune_DeinitializedSubmoduleWorktreeReaped(t *testing.T) {
+	proj, wt, _ := newPruneProjectWithPopulatedSubmodule(t)
+	pruneGit(t, wt, "submodule", "deinit", "-f", "sub")
+
+	// Premise: `submodule status` now LOOKS uninitialized (leading '-')...
+	if out, _ := pruneGitMay(wt, "submodule", "status"); !strings.HasPrefix(strings.TrimSpace(out), "-") {
+		t.Fatalf("premise broken: deinit must leave a '-' status line, got:\n%s", out)
+	}
+	// ...yet the worktree still carries the submodule gitdir, and git still refuses.
+	if n := populatedSubmodules(wt); n != 1 {
+		t.Fatalf("premise broken: the deinitialized submodule's gitdir must still count, got %d", n)
+	}
+	if out, ok := pruneGitMay(proj, "worktree", "remove", wt); ok {
+		t.Fatalf("premise broken: git accepted a deinitialized-submodule worktree removal:\n%s", out)
+	}
+
+	st, msg := runMaintenanceVerbIn(proj, "prune", map[string]any{"mode": "prune"})
+	if st != spec.StatusPass {
+		t.Fatalf("a deinitialized-submodule worktree must not fail the step: %s: %s", st, msg)
+	}
+	if _, err := os.Stat(wt); err == nil {
+		t.Fatalf("the deinitialized-submodule worktree must still be reaped:\n%s", msg)
+	}
+	if !strings.Contains(msg, "populated submodule") {
+		t.Fatalf("the force must be disclosed for the deinitialized case:\n%s", msg)
+	}
+}
+
+// TestPrune_LockedWorktreeSkipped proves a LOCKED worktree is SKIPPED, never
+// unlocked-and-reaped. `git worktree lock` is a deliberate operator protection,
+// and prune's contract is to prune strictly LESS — a single `--force` does not
+// even clear a lock (MEASURED: `-f -f` is required), so forcing would both
+// violate the intent and still fail the step.
+func TestPrune_LockedWorktreeSkipped(t *testing.T) {
+	proj, wt, _ := newPruneProjectWithPopulatedSubmodule(t)
+	pruneGit(t, proj, "worktree", "lock", "--reason", "operator protection", wt)
+
+	st, msg := runMaintenanceVerbIn(proj, "prune", map[string]any{"mode": "prune"})
+	if st != spec.StatusPass {
+		t.Fatalf("a locked worktree must not fail the step: %s: %s", st, msg)
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Fatalf("a locked worktree must NOT be removed: %v", err)
+	}
+	if !strings.Contains(msg, "locked") {
+		t.Fatalf("the report must name the locked skip:\n%s", msg)
+	}
+	// The lock must survive — prune never unlocks.
+	if out, ok := pruneGitMay(proj, "worktree", "list", "--porcelain"); !ok || !strings.Contains(out, "locked") {
+		t.Fatalf("the lock must survive prune:\n%s", out)
+	}
+}
+
 // TestPrune_UninitializedSubmoduleIsNeverSwept is the regression for
 // plugin-task#16 — the charly#768 class, missed in verb:prune. `git -C` only
 // CHANGES DIRECTORY: on a present-but-UNINITIALIZED submodule directory (an empty

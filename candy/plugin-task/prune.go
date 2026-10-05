@@ -61,6 +61,7 @@ type worktreeEntry struct {
 	Branch   string // short name; "" when detached
 	Detached bool
 	Main     bool // the first block is the repo's own checkout
+	Locked   bool // `git worktree lock` — a deliberate operator protection
 }
 
 // prunable records one worktree/branch the sweep decided to act on.
@@ -128,6 +129,15 @@ func runPrune(projDir string, in params.PruneInput) (spec.Status, string) {
 				skipped = append(skipped, relRepo(projDir, r)+":worktree "+w.Path+" (detached HEAD — no branch to prove merged)")
 				continue
 			}
+			// A LOCK is a deliberate operator protection (`git worktree lock`), and
+			// `git worktree remove` refuses a locked tree with `-f -f` required — a
+			// single `--force` does NOT clear it (MEASURED). Prune must never unlock
+			// and reap a worktree someone deliberately pinned, so this is a SKIP,
+			// not a force: the safety rule is "prune strictly LESS".
+			if w.Locked {
+				skipped = append(skipped, relRepo(projDir, r)+":worktree "+w.Path+" (locked — operator protection; unlock first to reap)")
+				continue
+			}
 			trackClean, untracked := worktreeStatus(w.Path)
 			if !trackClean {
 				skipped = append(skipped, relRepo(projDir, r)+":worktree "+w.Path+" (modified tracked files)")
@@ -137,17 +147,30 @@ func runPrune(projDir string, in params.PruneInput) (spec.Status, string) {
 			if !ok {
 				continue
 			}
-			// `git worktree remove` refuses a worktree with untracked entries, so a
-			// force is required to reap it — and that DISCARDS the untracked files.
-			// The count is carried into the report so the discard is never silent.
+			// `git worktree remove` refuses a worktree for TWO independent reasons,
+			// and BOTH must force or the whole step fails and the Pass-2 branch reap
+			// never runs (plugin-task#18):
+			//   1. untracked entries — forcing DISCARDS them, so the count is
+			//      carried into the report and the discard is never silent;
+			//   2. a POPULATED submodule — `fatal: working trees containing
+			//      submodules cannot be moved or removed`, raised even when the
+			//      worktree is CLEAN. Only an INITIALIZED submodule blocks (a
+			//      declared-but-uninitialized one removes fine), and this is the
+			//      ROUTINE case in this umbrella: reading a skill by path populates
+			//      `marketplace`, a build populates `charly`.
+			subs := populatedSubmodules(w.Path)
+			force := untracked > 0 || subs > 0
 			reason := why
 			if untracked > 0 {
 				reason = fmt.Sprintf("%s; discards %d untracked entr%s", why, untracked, plural(untracked))
 			}
+			if subs > 0 {
+				reason = fmt.Sprintf("%s; discards %d populated submodule%s", reason, subs, pluralSub(subs))
+			}
 			p := prunable{Repo: relRepo(projDir, r), Kind: "worktree", Target: w.Path, Reason: reason}
 			plan = append(plan, p)
 			if mode == "prune" {
-				if err := removeWorktree(r, w.Path, untracked > 0); err != nil {
+				if err := removeWorktree(r, w.Path, force); err != nil {
 					return spec.StatusFail, fmt.Sprintf("prune: remove worktree %s: %v", w.Path, err)
 				}
 				acted = append(acted, p)
@@ -297,6 +320,8 @@ func listWorktrees(repoDir string) ([]worktreeEntry, error) {
 			cur.Branch = strings.TrimPrefix(ref, "refs/heads/")
 		case line == "detached":
 			cur.Detached = true
+		case line == "locked" || strings.HasPrefix(line, "locked "):
+			cur.Locked = true
 		}
 	}
 	flush()
@@ -325,6 +350,38 @@ func worktreeStatus(wt string) (trackClean bool, untracked int) {
 		trackClean = false
 	}
 	return trackClean, untracked
+}
+
+// populatedSubmodules returns how many of the worktree's submodules have a
+// CHECKED-OUT git dir. `git worktree remove` refuses a worktree containing them —
+// `fatal: working trees containing submodules cannot be moved or removed` — even
+// when the worktree is otherwise clean, which is why the caller must force.
+//
+// The predicate is the worktree gitdir's own `modules/` directory, NOT
+// `git submodule status`'s leading character. MEASURED (git 2.56.0): a submodule
+// that was initialized and then DEINITIALIZED still reports '-' from
+// `submodule status` (looking uninitialized) yet STILL refuses removal — its
+// gitdir under `.git/worktrees/<name>/modules` survives `deinit`. Only a submodule
+// that was NEVER initialized removes fine, and that is exactly the case with no
+// `modules/` directory. Counting `submodule status` lines would have mis-classified
+// the deinitialized case and left this bug live.
+func populatedSubmodules(wt string) int {
+	out, exit := gitCapture(wt, "rev-parse", "--git-path", "modules")
+	if exit != 0 {
+		return 0
+	}
+	dir := strings.TrimSpace(out)
+	if dir == "" {
+		return 0
+	}
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(wt, dir)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	return len(entries)
 }
 
 // listLocalBranches returns every local branch short name.
@@ -395,6 +452,15 @@ func plural(n int) string {
 		return "y"
 	}
 	return "ies"
+}
+
+// pluralSub returns ""/"s" for a count, so a report line reads
+// "1 populated submodule" / "2 populated submodules".
+func pluralSub(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // pathWithin reports whether p is dir itself or lies under it.
