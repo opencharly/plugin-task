@@ -549,3 +549,169 @@ func TestSubmoduleAt(t *testing.T) {
 		t.Fatalf("an uninitialized submodule dir must error")
 	}
 }
+
+// gitIn runs git in an ALREADY-INITIALIZED dir (a clone target, a bare repo) with a
+// hermetic environment — the fixture runner for repos `gitRepo` must not re-init.
+func gitIn(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// bumpOrigins builds the two REAL bare origins the #13 fixtures use: `leaf` (L1 then
+// L2 — the roll target) and `doomed` (the origin a test REMOVES, so a submodule's
+// `git fetch origin` fails for real, with no mock and no sleep).
+func bumpOrigins(t *testing.T) (base, leafBare, doomedBare, L1, L2 string) {
+	t.Helper()
+	base = t.TempDir()
+	leaf := filepath.Join(base, "leaf")
+	gitIn(t, base, "init", "-q", "-b", "main", "leaf")
+	writeFile(t, filepath.Join(leaf, "f"), "L1")
+	gitIn(t, leaf, "add", "-A")
+	gitIn(t, leaf, "commit", "-qm", "L1")
+	L1 = gitIn(t, leaf, "rev-parse", "HEAD")
+	writeFile(t, filepath.Join(leaf, "f"), "L2")
+	gitIn(t, leaf, "add", "-A")
+	gitIn(t, leaf, "commit", "-qm", "L2")
+	L2 = gitIn(t, leaf, "rev-parse", "HEAD")
+	leafBare = filepath.Join(base, "leaf.git")
+	gitIn(t, base, "clone", "-q", "--bare", leaf, leafBare)
+
+	doomed := filepath.Join(base, "doomed-src")
+	gitIn(t, base, "init", "-q", "-b", "main", "doomed-src")
+	writeFile(t, filepath.Join(doomed, "d"), "d")
+	gitIn(t, doomed, "add", "-A")
+	gitIn(t, doomed, "commit", "-qm", "d")
+	doomedBare = filepath.Join(base, "doomed.git")
+	gitIn(t, base, "clone", "-q", "--bare", doomed, doomedBare)
+	return base, leafBare, doomedBare, L1, L2
+}
+
+// newBumpUmbrella builds a REAL umbrella declaring the named submodules (each with
+// branch=main), pins every submodule that is not `doomed`/`src` to pinSHA, and
+// initializes them all.
+func newBumpUmbrella(t *testing.T, base, pinSHA, leafBare, doomedBare string, names ...string) string {
+	t.Helper()
+	umb := filepath.Join(base, "umb-"+strings.Join(names, "-"))
+	gitIn(t, base, "init", "-q", "-b", "main", filepath.Base(umb))
+	writeFile(t, filepath.Join(umb, "u"), "u")
+	gitIn(t, umb, "add", "-A")
+	gitIn(t, umb, "commit", "-qm", "u")
+	for _, n := range names {
+		src := leafBare
+		if n == "doomed" || n == "src" {
+			src = doomedBare
+		}
+		gitIn(t, umb, "-c", "protocol.file.allow=always", "submodule", "add", "-q", src, n)
+		gitIn(t, umb, "config", "-f", ".gitmodules", "submodule."+n+".branch", "main")
+	}
+	gitIn(t, umb, "add", ".gitmodules")
+	gitIn(t, umb, "commit", "-qm", "branch=main")
+	if pinSHA != "" {
+		for _, n := range names {
+			if n == "doomed" || n == "src" {
+				continue
+			}
+			gitIn(t, umb, "update-index", "--add", "--cacheinfo", "160000,"+pinSHA+","+n)
+		}
+		gitIn(t, umb, "commit", "-qm", "stale pins")
+	}
+	gitIn(t, umb, "-c", "protocol.file.allow=always", "submodule", "update", "--init")
+	return umb
+}
+
+// TestGitSubmodules_BumpContinuesPastFailure proves plugin-task#13's fix: ONE path's
+// per-invocation failure costs that ONE pin, not every pin sorted after it. Before the
+// fix the walk RETURNED at the first failure (phase 1 of `bump`), so a single contended
+// checkout — a momentarily held superproject `.git/index.lock` failing that path's
+// `git add`, the mechanism reproduced in the issue — stranded the whole remainder.
+func TestGitSubmodules_BumpContinuesPastFailure(t *testing.T) {
+	base, leafBare, doomedBare, L1, L2 := bumpOrigins(t)
+	// Path order is SORTED (submodulePaths), so `doomed` is visited FIRST and `zebra`
+	// sorts AFTER it — exactly the ordering that used to strand the rest.
+	umb := newBumpUmbrella(t, base, L1, leafBare, doomedBare, "doomed", "zebra")
+	// The failing path's failure is set up AFTER initialization: its origin is GONE,
+	// so `git fetch origin` in that submodule fails for real.
+	if err := os.RemoveAll(doomedBare); err != nil {
+		t.Fatal(err)
+	}
+
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
+	if st != spec.StatusFail {
+		t.Fatalf("bump with one failing path must FAIL, got %s: %s", st, msg)
+	}
+	if !strings.Contains(msg, "doomed") {
+		t.Fatalf("the aggregated failure must NAME the failing path, got: %s", msg)
+	}
+	// THE ASSERTION: `zebra` sorts AFTER the failing `doomed` and still rolled to L2.
+	if got := gitlink(umb, "zebra"); got != L2 {
+		t.Fatalf("zebra was stranded by doomed's failure: gitlink=%s want L2=%s (L1=%s)", got, L2, L1)
+	}
+}
+
+// TestGitSubmodules_BumpRefusesStalePinnedFrom proves the LOAD-BEARING order guard
+// survives the continue-on-failure change: when the pinned_from repo does NOT roll, its
+// gitlinks are the OLD ones, and pinning a pin_map entry from them is the policy-B
+// violation that order exists to prevent. Phase 2 must REFUSE and say so — never
+// silently pin from stale data.
+func TestGitSubmodules_BumpRefusesStalePinnedFrom(t *testing.T) {
+	base, leafBare, doomedBare, L1, _ := bumpOrigins(t)
+	umb := newBumpUmbrella(t, base, L1, leafBare, doomedBare, "src", "target")
+	if err := os.RemoveAll(doomedBare); err != nil {
+		t.Fatal(err)
+	}
+
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{
+		"mode": "bump", "pinned_from": "src", "pin_map": map[string]any{"target": "inner"},
+	})
+	if st != spec.StatusFail {
+		t.Fatalf("a bump whose pinned_from did not roll must FAIL, got %s: %s", st, msg)
+	}
+	if !strings.Contains(msg, "did not roll") {
+		t.Fatalf("the refusal must say the pinned_from did not roll, got: %s", msg)
+	}
+	// THE ASSERTION: target is UNTOUCHED — it was never pinned from stale gitlinks.
+	if got := gitlink(umb, "target"); got != L1 {
+		t.Fatalf("target pinned from a STALE pinned_from: gitlink=%s want the unchanged L1=%s", got, L1)
+	}
+}
+
+// TestGitSubmodules_BumpExternalPinnedFrom is the boundary guard for the refusal above:
+// a pinned_from that is NOT one of this project's own submodules — the `../src` shape
+// scripts/gate-task.sh's pins-bump fixture exercises, and the shape the umbrella's own
+// `pins` task uses when the twin lives outside the tree — is NEVER rolled by this walk,
+// so it must not be judged "did not roll". Its gitlinks are READ and pinned from, exactly
+// as before. This test fails if the staleness refusal is widened to external checkouts,
+// which would make every roll of that shape a hard failure.
+func TestGitSubmodules_BumpExternalPinnedFrom(t *testing.T) {
+	base, leafBare, doomedBare, L1, L2 := bumpOrigins(t)
+	// The umbrella declares ONLY `target`; the pinned_from lives BESIDE it.
+	umb := newBumpUmbrella(t, base, L1, leafBare, doomedBare, "target")
+	// `srcrepo` is a sibling checkout, NOT a submodule of the umbrella. It pins `inner`
+	// at L2 — the value `target` must adopt.
+	srcDir := filepath.Join(base, "srcrepo")
+	gitIn(t, base, "init", "-q", "-b", "main", "srcrepo")
+	writeFile(t, filepath.Join(srcDir, "s"), "s")
+	gitIn(t, srcDir, "add", "-A")
+	gitIn(t, srcDir, "commit", "-qm", "s")
+	gitIn(t, srcDir, "-c", "protocol.file.allow=always", "submodule", "add", "-q", leafBare, "inner")
+	gitIn(t, srcDir, "update-index", "--add", "--cacheinfo", "160000,"+L2+",inner")
+	gitIn(t, srcDir, "commit", "-qm", "inner=L2")
+
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{
+		"mode": "bump", "pinned_from": "../srcrepo", "pin_map": map[string]any{"target": "inner"},
+	})
+	if st != spec.StatusPass {
+		t.Fatalf("an EXTERNAL pinned_from must still pin its pin_map entries, got %s: %s", st, msg)
+	}
+	if got := gitlink(umb, "target"); got != L2 {
+		t.Fatalf("target not pinned from the external pinned_from: gitlink=%s want L2=%s (L1=%s)", got, L2, L1)
+	}
+}
