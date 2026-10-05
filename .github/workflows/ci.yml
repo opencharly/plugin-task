@@ -48,3 +48,44 @@ jobs:
       - name: go test
         working-directory: candy/plugin-task
         run: go test ./...
+
+  coherence:
+    # Cheap control, EVERY pull request (~seconds): charly main's OWN sdk/spec pins
+    # must LEAD this module's requires, or gate-task.sh's build would die fifty errors
+    # deep inside plugin-box, naming neither this repo nor the cause (plugin-task#14).
+    # This is the SAME control scripts/gate-task.sh runs against the charly checkout it
+    # is about to build — one implementation, two callers (R3) — so the failure mode
+    # that let the gate rot unrunnable is caught at the PR, before merge.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: self-test the coherence control
+        run: bash scripts/check-coherence.sh --self-test
+
+      - name: assert charly main's pins lead this module's requires
+        run: |
+          curl -sfL -o "$RUNNER_TEMP/charly-go.mod" \
+            https://raw.githubusercontent.com/opencharly/charly/main/charly/go.mod
+          bash scripts/check-coherence.sh "$RUNNER_TEMP/charly-go.mod" \
+            candy/plugin-task/go.mod "charly main"
+
+  gate:
+    # The repo's ONLY live execution of the five maintenance verbs, and the expensive
+    # one: it clones charly and builds a real binary with this candy compiled in, then
+    # drives every verb on real git fixtures. It runs on `main` and on demand — NOT on
+    # every PR — because the `coherence` job above catches, at the PR, the failure mode
+    # that let this gate rot unrunnable and unnoticed (plugin-task#14). main is where
+    # the full live proof runs, on the tree that ships.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: candy/plugin-task/go.mod
+          cache-dependency-path: candy/plugin-task/go.sum
+
+      - name: gate
+        run: bash scripts/gate-task.sh

@@ -19,7 +19,12 @@ Canonical files:
 - `candy/plugin-task/schema/task.cue` + `params/cue_types_gen.go` — the
   self-contained schema and its generated types.
 - `candy/plugin-task/cmd/serve/main.go` — the out-of-process serve shim.
-- `scripts/gate-task.sh` — the repo's own gate helper.
+- `scripts/gate-task.sh` — the repo's own gate helper: builds a real charly binary
+  with this candy compiled in and drives `command:task` + the five maintenance
+  verbs live.
+- `scripts/check-coherence.sh` — the control that charly's own `sdk`/`spec` pins
+  lead this module's requires. Called by `gate-task.sh` (before its build) and by
+  the CI `coherence` job; `--self-test` proves it can fail.
 - `.github/workflows/ci.yml` + `.github/workflows/tag-on-merge.yml`.
 - `README.md` — user overview only; never agent guidance.
 
@@ -45,6 +50,15 @@ when one is authored, add it here.
 - `cd candy/plugin-task && gofmt -l .` — formatting (empty output passes).
 - `charly box validate` at the repo root — the structural check (the candy +
   `plugin:` block, CUE schema).
+- `scripts/gate-task.sh` at the repo root — the live gate: it clones charly at
+  `CHARLY_REF` (default `main`), builds a binary with this candy compiled in, and
+  drives `command:task` plus the five maintenance verbs against real git fixtures.
+  It is the ONLY live execution of those verbs, so it must keep running.
+- CI runs two jobs besides the Go gates: `coherence` on every PR (seconds — the
+  same `scripts/check-coherence.sh` control the gate runs, so the vintage-coherence
+  failure cannot reach merge), and `gate` on `main` and on demand (the full live
+  proof, on the tree that ships). A change to the verbs is proven by running
+  `scripts/gate-task.sh` locally; neither job is a substitute for that.
 - The merge gate is the **org-wide** `charly/pr-validator` (required check
   `validate / validate`, defined in `opencharly/.github`); this repo has **no**
   per-repo candy gate.
