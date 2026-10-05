@@ -122,6 +122,9 @@ echo "$comp_out" | grep -q 'leaf-reason: boom on stderr' || {
 echo "$comp_out" | grep -q 'the leaf step (its Message is the reason)' || {
   echo "FAIL: the composite must name the failing step's PATH, not just its reason" >&2
   printf '%s\n' "$comp_out" >&2; exit 1; }
+# Print the LIVE composite verdict so the post-fix proof is in this gate's own output,
+# not only in a unit test.
+printf '%s\n' "$comp_out" | sed 's/^/   | /'
 echo "   the composite carried the leaf step's reason AND its path across the hop"
 
 # ---------------------------------------------------------------------------
