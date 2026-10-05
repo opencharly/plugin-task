@@ -228,7 +228,26 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		// its gitlinks to pin the pin_map entries. The reverse order pins from the
 		// pinned repo's OLD HEAD and then advances it, leaving policy B violated after
 		// every sync.
-		var done []string
+		//
+		// ONE FAILURE NEVER STRANDS THE REST (plugin-task#13): a per-path failure is
+		// RECORDED and the walk CONTINUES, so one contended checkout — e.g. a
+		// momentarily held superproject `.git/index.lock` failing that path's `git add`
+		// — costs that ONE pin instead of every pin sorted after it. Every failure is
+		// reported together at the end, so the run's own output names all of them.
+		var done, failures []string
+		// pinned_from may be an EXTERNAL checkout (`../src`) rather than one of this
+		// project's OWN submodules; only a pinned_from that IS one of `paths` is rolled
+		// by phase 1, so only that case can be judged "did not roll". An external
+		// pinned_from is read as it stands — its gitlinks are never advanced here — so
+		// the refusal below must not fire for it.
+		pinnedFromIsPath := false
+		for _, p := range paths {
+			if p == in.PinnedFrom {
+				pinnedFromIsPath = true
+				break
+			}
+		}
+		pinnedFromRolled := !pinnedFromIsPath
 		// Phase 1: every submodule NOT named in pin_map rolls to its default-branch HEAD.
 		for _, p := range paths {
 			if skipped[p] {
@@ -242,25 +261,48 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 				continue
 			}
 			if st, msg := pinSubmodule(projDir, p, "origin/"+branch); st != spec.StatusPass {
-				return st, msg
+				failures = append(failures, msg)
+				continue
+			}
+			if p == in.PinnedFrom {
+				pinnedFromRolled = true
 			}
 			done = append(done, p)
 		}
 		// Phase 2: pin each pin_map entry from the (now-current) pinned_from gitlinks.
-		for upath, cpath := range in.PinMap {
-			if skipped[upath] {
-				continue
+		//
+		// A pinned_from that IS one of this project's submodules and did NOT roll (its
+		// roll failed, or it was skipped) is REFUSED as a source: its gitlinks are the
+		// OLD ones, and pinning a pin_map entry from them is exactly the policy-B
+		// violation the load-bearing order above exists to prevent. The refusal is
+		// REPORTED, never silent.
+		if !pinnedFromRolled {
+			failures = append(failures, fmt.Sprintf(
+				"refused to pin %d pin_map entr(y|ies): pinned_from %q did not roll, so its gitlinks are stale and pinning from them would violate policy B",
+				len(in.PinMap), in.PinnedFrom))
+		} else {
+			for upath, cpath := range in.PinMap {
+				if skipped[upath] {
+					continue
+				}
+				sha := submoduleGitlink(projDir, in.PinnedFrom, cpath)
+				if sha == "" {
+					failures = append(failures, fmt.Sprintf("no gitlink for %q in %q", cpath, in.PinnedFrom))
+					continue
+				}
+				if st, msg := pinSubmodule(projDir, upath, sha); st != spec.StatusPass {
+					failures = append(failures, msg)
+					continue
+				}
+				done = append(done, upath)
 			}
-			sha := submoduleGitlink(projDir, in.PinnedFrom, cpath)
-			if sha == "" {
-				return spec.StatusFail, fmt.Sprintf("no gitlink for %q in %q", cpath, in.PinnedFrom)
-			}
-			if st, msg := pinSubmodule(projDir, upath, sha); st != spec.StatusPass {
-				return st, msg
-			}
-			done = append(done, upath)
 		}
 		sort.Strings(done)
+		sort.Strings(failures)
+		if len(failures) > 0 {
+			return spec.StatusFail, fmt.Sprintf("bumped %d submodule pin(s): %s; %d FAILED: %s",
+				len(done), strings.Join(done, ", "), len(failures), strings.Join(failures, "; "))
+		}
 		return spec.StatusPass, fmt.Sprintf("bumped %d submodule pin(s): %s", len(done), strings.Join(done, ", "))
 
 	case "verify":
