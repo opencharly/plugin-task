@@ -373,4 +373,74 @@ prune_out="$(cd "$PRUNE" && "$CH" task prune)"; echo "$prune_out" | grep -q '0 f
 [ -d "$PRUNE/.worktrees/aa-merged" ] && { echo "FAIL: merged worktree survived prune" >&2; exit 1; }
 [ -f "$PRUNE/.worktrees/bb-wip/.git" ] || { echo "FAIL: unmerged worktree was removed" >&2; exit 1; }
 
+# ---------------------------------------------------------------------------
+# 4) verb:prune + an UNINITIALIZED submodule (plugin-task#16 — the charly#768 class,
+# missed in verb:prune). `git -C <path>` only CHANGES DIRECTORY: on a
+# present-but-uninitialized submodule dir git WALKS UP to the superproject, so every
+# `worktree list` / `for-each-ref` / `branch -D` the sweep made through that path read
+# and MUTATED the PROJECT itself. Pre-fix pruneRepos accepted any existing directory,
+# so the project's own worktrees and branches were reported prunable once per
+# uninitialized submodule. The gate asserts (a) NO target is attributed to the
+# uninitialized submodule, (b) the project's own targets are STILL swept (the guard
+# must not disable the sweep), and (c) `mode=prune` completes cleanly.
+# ---------------------------------------------------------------------------
+PRUNE2="$WORK/pruneuninit"
+mkdir -p "$PRUNE2"
+(
+  cd "$PRUNE2" && git init -q -b main
+  echo base > f && git add -A && G commit -qm base
+  # merged branch = fast-forward onto main (ancestor) -> legitimately prunable
+  git branch feat/merged main
+  # unmerged branch = a commit NOT on main
+  git switch -q -c feat/wip && echo wip > w && git add -A && G commit -qm wip && git switch -q main
+  git worktree add -q .worktrees/aa-merged feat/merged
+  # `gap` is DECLARED (with a gitlink) but never `submodule update --init`-ed.
+  printf '[submodule "gap"]\n\tpath = gap\n\turl = %s\n' "$FIX/subsrc" > .gitmodules
+  git add .gitmodules && G commit -qm gm
+  git update-index --add --cacheinfo "160000,$C1,gap" && G commit -qm pin
+  mkdir -p gap   # present-but-UNINITIALIZED
+)
+cat > "$PRUNE2/charly.yml" <<'YML'
+prune-report:
+  task:
+    description: report the prunable set over a fixture with an uninitialized submodule
+    dir: .
+    plan:
+      - run: report the prunable set
+        prune: {mode: report, base: main, local_only: true}
+        context: [deploy]
+prune-run:
+  task:
+    description: reap merged-upstream worktrees and branches over that fixture
+    dir: .
+    plan:
+      - run: prune merged worktrees and branches
+        prune: {mode: prune, base: main, local_only: true}
+        context: [deploy]
+YML
+
+echo "== verb:prune (uninitialized submodule -> the SUPERPROJECT is never attributed to it) =="
+preport="$(cd "$PRUNE2" && "$CH" task prune-report)" || { echo "FAIL: the prune report did not run" >&2; exit 1; }
+if printf '%s\n' "$preport" | awk '($1=="worktree"||$1=="branch") && $2=="gap"{f=1} END{if(f) exit 0; exit 1}'; then
+  echo "FAIL: the prune report attributed a SUPERPROJECT target to the uninitialized submodule 'gap'" >&2
+  printf '%s\n' "$preport" >&2
+  exit 1
+fi
+# The guard must not DISABLE the sweep: in report mode the merged WORKTREE is the reported
+# target (the branch behind it is only freed in Pass 2, so it is not yet a target), and it
+# must be attributed to the PROJECT root — never to the uninitialized submodule.
+if ! printf '%s\n' "$preport" | awk '($1=="worktree"||$1=="branch") && $2=="."{f=1} END{exit !f}'; then
+  echo "FAIL: the guard must not disable the sweep (no target attributed to the project root)" >&2
+  printf '%s\n' "$preport" >&2
+  exit 1
+fi
+echo "   uninitialized submodule contributed nothing; the project's own targets still reported"
+
+echo "== verb:prune mode=prune with an uninitialized submodule present (must complete cleanly) =="
+prune2_out="$(cd "$PRUNE2" && "$CH" task prune-run)" || { echo "FAIL: prune must not fail with an uninitialized submodule present" >&2; printf '%s\n' "$prune2_out" >&2; exit 1; }
+(cd "$PRUNE2" && git rev-parse -q --verify refs/heads/feat/merged >/dev/null) && { echo "FAIL: merged branch survived prune" >&2; exit 1; }
+(cd "$PRUNE2" && git rev-parse -q --verify refs/heads/feat/wip >/dev/null) || { echo "FAIL: unmerged branch was pruned" >&2; exit 1; }
+[ -d "$PRUNE2/gap" ] || { echo "FAIL: the uninitialized submodule dir must remain" >&2; exit 1; }
+echo "   mode=prune completed cleanly; unmerged kept, merged reaped, uninitialized dir intact"
+
 echo "gate-task: PASS — command:task + all five maintenance verbs executed live against charly $CHARLY_TAG"

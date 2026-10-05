@@ -240,16 +240,31 @@ func branchMerged(repoDir, branch, tip, base string, prs map[string][]prInfo, gh
 	return false, ""
 }
 
-// pruneRepos returns the project root plus every checked-out submodule directory.
+// pruneRepos returns the project root plus every INITIALIZED submodule checkout.
+//
+// WHY the submoduleAt guard (plugin-task#16, the charly#768 class): `git -C
+// <path>` only CHANGES DIRECTORY. On a present-but-uninitialized submodule
+// directory — the normal state of a fresh `git worktree` before `git submodule
+// update --init` — git then WALKS UP to the enclosing repository and resolves to
+// the SUPERPROJECT. Every git call the sweep makes through that path (worktree
+// list, for-each-ref, branch -D) would therefore read and MUTATE the project
+// itself: the project's own worktrees and branches surface once per
+// uninitialized submodule, and in `mode=prune` Pass 2 the `branch -D` reaches
+// branches that belong to the SUPERPROJECT — including OTHER sessions' (rule 9).
+// submoduleAt is the walk-up-safe guard the sibling `git-submodules` verb
+// already uses; an uninitialized submodule contributes NOTHING (the sweep is
+// strictly smaller, never larger).
 func pruneRepos(projDir string) []string {
 	repos := []string{projDir}
-	if subs, err := submodulePaths(projDir); err == nil {
-		for _, s := range subs {
-			d := filepath.Join(projDir, s)
-			if fi, err := os.Stat(d); err == nil && fi.IsDir() {
-				repos = append(repos, d)
-			}
+	subs, err := submodulePaths(projDir)
+	if err != nil {
+		return repos
+	}
+	for _, s := range subs {
+		if _, _, aerr := submoduleAt(projDir, s); aerr != nil {
+			continue
 		}
+		repos = append(repos, filepath.Join(projDir, s))
 	}
 	sort.Strings(repos)
 	return repos
