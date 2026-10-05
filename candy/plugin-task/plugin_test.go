@@ -278,6 +278,9 @@ func TestRunTask_ForceBypassesStatus(t *testing.T) {
 type fakeResolver struct {
 	status   spec.Status
 	captured string
+	// message is the verb's own diagnostic, carried on the step's CheckResult — the
+	// ONLY place a leaf step's reason exists (see failureSummary).
+	message string
 }
 
 func (f *fakeResolver) RunVerb(_ context.Context, op *spec.Op) (spec.CheckResult, bool) {
@@ -285,7 +288,7 @@ func (f *fakeResolver) RunVerb(_ context.Context, op *spec.Op) (spec.CheckResult
 	// as a pass (the point is the WALK, not the shell). captured lets a test prove
 	// --output carries a step's CapturedValue verbatim.
 	if op.Plugin == "command" {
-		return spec.CheckResult{Status: f.status, CapturedValue: f.captured}, true
+		return spec.CheckResult{Status: f.status, CapturedValue: f.captured, Message: f.message}, true
 	}
 	return spec.CheckResult{}, false
 }

@@ -347,14 +347,59 @@ func invokeOpRun(ctx context.Context, req *pb.InvokeRequest) (*pb.InvokeReply, e
 		}
 		ran++
 		failed += r.Failed
-		if r.Status == "error" {
-			return verbResult(spec.StatusFail, fmt.Sprintf("task %q: %s", n, r.Message))
-		}
-		if r.Status == "ran" && r.Failed > 0 && !r.ContinueOnError {
-			return verbResult(spec.StatusFail, fmt.Sprintf("task %q failed (%s)", n, r.Message))
+		if st, msg := nestedVerdict(n, r); st != spec.StatusPass {
+			return verbResult(st, msg)
 		}
 	}
 	return verbResult(spec.StatusPass, fmt.Sprintf("ran %d task(s), %d step(s) failed", ran, failed))
+}
+
+// nestedVerdict decides ONE task's verdict as it crosses the `task:` hop. It is the
+// seam the hop's message contract lives in, and it is a named function precisely so a
+// test can drive it: the reason for a nested failure is destroyed HERE and nowhere
+// else (plugin-task#12), and a test that only exercised a helper beside the call site
+// would pass even after the call site regressed to the bare `r.Message` — the
+// "a gate that cannot fail on the change proves nothing" failure. A StatusPass return
+// means "this task is fine, keep walking"; a non-pass means the caller stops.
+func nestedVerdict(name string, r *runResult) (spec.Status, string) {
+	if r.Status == "error" {
+		return spec.StatusFail, fmt.Sprintf("task %q: %s", name, r.Message)
+	}
+	if r.Status == "ran" && r.Failed > 0 && !r.ContinueOnError {
+		return spec.StatusFail, fmt.Sprintf("task %q failed (%s)", name, nestedFailureMessage(r))
+	}
+	return spec.StatusPass, ""
+}
+
+// nestedFailureMessage renders a nested task's failure for the `task:` hop boundary.
+//
+// Only the task-level Message crosses that hop — this function's caller returns
+// verbResult(… r.Message) and drops r.Steps, and the single CheckResult it builds has
+// no field for nested steps. A bare "N step(s) failed" therefore made a composite
+// task's failure un-diagnosable: the leaf step's own reason exists at the top level
+// (printResultText prints every step) and was DESTROYED exactly at the hop. That cost
+// the umbrella a ~424-submodule `task sync` failure whose cause was transient and
+// consequently unknowable (plugin-task#12) — an R1 "root-cause every anomaly" failure,
+// because the harness itself made the anomaly un-diagnosable.
+//
+// Each failing step is named by its keyword + text and followed by its own message,
+// indented, mirroring formatStepLine so the nested text reads the same as the direct
+// run's. The top level is deliberately left alone: it already prints these lines, so
+// enriching there would duplicate the reason rather than carry it.
+func nestedFailureMessage(r *runResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d step(s) failed", r.Failed)
+	for _, s := range r.Steps {
+		if s.Result.Status != spec.StatusFail {
+			continue
+		}
+		fmt.Fprintf(&b, "\n  [%s] %s — %s", s.Result.Status.String(), s.Keyword, firstLine(s.Text))
+		if msg := strings.TrimRight(s.Result.Message, "\n"); msg != "" {
+			b.WriteString("\n      ")
+			b.WriteString(strings.ReplaceAll(msg, "\n", "\n      "))
+		}
+	}
+	return b.String()
 }
 
 // verbResult marshals a verb verdict as the reply the plan harness decodes. The wire
