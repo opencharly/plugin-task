@@ -7,27 +7,41 @@
 # way: build a real charly binary with candy/plugin-task compiled IN, then drive
 # `charly task` and each maintenance verb end to end.
 #
-# The charly checkout is pinned to v2026.267.2313 — the tag that compiles
-# candy/plugin-task into the binary. A LOCAL `-replace` points that compiled-in
-# module at THIS working tree, so the artifact under test IS the changed source.
-# (v2026.267.2313 predates the maintenance verbs, so without the replace the verb
-# words would not resolve — exactly the failure this gate would catch.)
+# The charly checkout is built from CHARLY_REF, defaulting to `main` — the ref
+# that ADVANCES WITH this plugin's source. The LOCAL `-replace` below makes Go
+# read THIS working tree's go.mod, whose sdk/spec requires are same-day, while a
+# pinned TAG's OTHER compiled-in plugins are frozen at that tag's vintage. MVS
+# takes the max, so the tree's sdk/spec win and the tag's sibling plugins — built
+# against the older kit/deploykit APIs — stop compiling far from the cause.
+# `main`'s own pins lead this tree's by construction, so the build resolves.
 #
 # Usage: scripts/gate-task.sh   (from the repo root; needs git, go, a network)
+#        CHARLY_REF=<tag|sha> scripts/gate-task.sh   (reproduce a specific vintage)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLUGIN_DIR="$ROOT/candy/plugin-task"
-CHARLY_TAG="${CHARLY_TAG:-v2026.267.2313}"
+CHARLY_REF="${CHARLY_REF:-main}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/plugin-task-gate.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "== fetching charly $CHARLY_TAG (compiles candy/plugin-task in) =="
-git clone --depth 1 --branch "$CHARLY_TAG" https://github.com/opencharly/charly.git "$WORK/charly" 2>&1 | tail -1
+echo "== fetching charly $CHARLY_REF (compiles candy/plugin-task in) =="
+git clone --depth 1 --branch "$CHARLY_REF" https://github.com/opencharly/charly.git "$WORK/charly" 2>&1 | tail -1
 
 export GOTMPDIR="${GOTMPDIR:-$(mktemp -d)}"
 export GOWORK=off
 export GOFLAGS=-mod=mod
+# WHY CHARLY_PLUGIN_ONLY=1: the binary built below lands in a temp dir, so charly
+# classifies it a dev/worktree build and — on a host that HAS the charly package
+# installed — prints one "NOT loading the installed package's plugins" warning PER
+# PROCESS (~20 a run), which makes this gate's output HOST-DEPENDENT: the same
+# tree yields different output on two machines, so "zero warnings" is unprovable.
+# CHARLY_PLUGIN_ONLY resolves plugins AS-IF-UNPACKAGED — exactly this gate's
+# contract, since the artifact under test IS the tree's compiled-in plugin — and
+# returns before that warning site (charly/charly/plugin_loader.go: bakedPluginDirs
+# returns early under CHARLY_PLUGIN_ONLY, ahead of warnSkippedFHSPlugins). Verified
+# A/B against a dev build: warning count 1 -> 0, stdout identical, exit 0 both ways.
+export CHARLY_PLUGIN_ONLY=1
 (
   cd "$WORK/charly/charly"
   # Point the already-compiled-in plugin module at THIS working tree so the built
@@ -45,7 +59,6 @@ CH="$WORK/charly-bin"
 PROJ="$WORK/proj"
 mkdir -p "$PROJ"
 cat > "$PROJ/charly.yml" <<'YML'
-version: 2026.261.1747
 greet:
   task:
     description: greet the user
@@ -134,7 +147,6 @@ git add .gitmodules && G commit -qm branches
 git -c protocol.file.allow=always submodule update --init -q src target2
 
 cat > "$FIX/umb/charly.yml" <<'YML'
-version: 2026.261.1747
 pins-verify:
   task:
     description: verify policy B
@@ -212,7 +224,6 @@ YML
 # A second project exercising the LOAD-BEARING bump order (pinned_from is itself a
 # rolling stale submodule).
 cat > "$FIX/umb2/charly.yml" <<'YML'
-version: 2026.261.1747
 order-bump:
   task:
     description: bump target2 from src (which itself rolls first)
@@ -263,7 +274,6 @@ UNI="$WORK/uninit"; mkdir -p "$UNI"
   mkdir -p gap   # present-but-UNINITIALIZED
 )
 cat > "$UNI/charly.yml" <<'YML'
-version: 2026.261.1747
 bump-all:
   task:
     description: bump over a set containing an uninitialized submodule
@@ -356,7 +366,6 @@ mkdir -p "$PRUNE"
   git worktree add -q .worktrees/bb-wip feat/wip
 )
 cat > "$PRUNE/charly.yml" <<'YML'
-version: 2026.261.1747
 prune:
   task:
     description: reap merged-upstream worktrees and branches
@@ -373,4 +382,74 @@ prune_out="$(cd "$PRUNE" && "$CH" task prune)"; echo "$prune_out" | grep -q '0 f
 [ -d "$PRUNE/.worktrees/aa-merged" ] && { echo "FAIL: merged worktree survived prune" >&2; exit 1; }
 [ -f "$PRUNE/.worktrees/bb-wip/.git" ] || { echo "FAIL: unmerged worktree was removed" >&2; exit 1; }
 
-echo "gate-task: PASS — command:task + all five maintenance verbs executed live against charly $CHARLY_TAG"
+# ---------------------------------------------------------------------------
+# 4) verb:prune + an UNINITIALIZED submodule (plugin-task#16 — the charly#768 class,
+# missed in verb:prune). `git -C <path>` only CHANGES DIRECTORY: on a
+# present-but-uninitialized submodule dir git WALKS UP to the superproject, so every
+# `worktree list` / `for-each-ref` / `branch -D` the sweep made through that path read
+# and MUTATED the PROJECT itself. Pre-fix pruneRepos accepted any existing directory,
+# so the project's own worktrees and branches were reported prunable once per
+# uninitialized submodule. The gate asserts (a) NO target is attributed to the
+# uninitialized submodule, (b) the project's own targets are STILL swept (the guard
+# must not disable the sweep), and (c) `mode=prune` completes cleanly.
+# ---------------------------------------------------------------------------
+PRUNE2="$WORK/pruneuninit"
+mkdir -p "$PRUNE2"
+(
+  cd "$PRUNE2" && git init -q -b main
+  echo base > f && git add -A && G commit -qm base
+  # merged branch = fast-forward onto main (ancestor) -> legitimately prunable
+  git branch feat/merged main
+  # unmerged branch = a commit NOT on main
+  git switch -q -c feat/wip && echo wip > w && git add -A && G commit -qm wip && git switch -q main
+  git worktree add -q .worktrees/aa-merged feat/merged
+  # `gap` is DECLARED (with a gitlink) but never `submodule update --init`-ed.
+  printf '[submodule "gap"]\n\tpath = gap\n\turl = %s\n' "$FIX/subsrc" > .gitmodules
+  git add .gitmodules && G commit -qm gm
+  git update-index --add --cacheinfo "160000,$C1,gap" && G commit -qm pin
+  mkdir -p gap   # present-but-UNINITIALIZED
+)
+cat > "$PRUNE2/charly.yml" <<'YML'
+prune-report:
+  task:
+    description: report the prunable set over a fixture with an uninitialized submodule
+    dir: .
+    plan:
+      - run: report the prunable set
+        prune: {mode: report, base: main, local_only: true}
+        context: [deploy]
+prune-run:
+  task:
+    description: reap merged-upstream worktrees and branches over that fixture
+    dir: .
+    plan:
+      - run: prune merged worktrees and branches
+        prune: {mode: prune, base: main, local_only: true}
+        context: [deploy]
+YML
+
+echo "== verb:prune (uninitialized submodule -> the SUPERPROJECT is never attributed to it) =="
+preport="$(cd "$PRUNE2" && "$CH" task prune-report)" || { echo "FAIL: the prune report did not run" >&2; exit 1; }
+if printf '%s\n' "$preport" | awk '($1=="worktree"||$1=="branch") && $2=="gap"{f=1} END{if(f) exit 0; exit 1}'; then
+  echo "FAIL: the prune report attributed a SUPERPROJECT target to the uninitialized submodule 'gap'" >&2
+  printf '%s\n' "$preport" >&2
+  exit 1
+fi
+# The guard must not DISABLE the sweep: in report mode the merged WORKTREE is the reported
+# target (the branch behind it is only freed in Pass 2, so it is not yet a target), and it
+# must be attributed to the PROJECT root — never to the uninitialized submodule.
+if ! printf '%s\n' "$preport" | awk '($1=="worktree"||$1=="branch") && $2=="."{f=1} END{exit !f}'; then
+  echo "FAIL: the guard must not disable the sweep (no target attributed to the project root)" >&2
+  printf '%s\n' "$preport" >&2
+  exit 1
+fi
+echo "   uninitialized submodule contributed nothing; the project's own targets still reported"
+
+echo "== verb:prune mode=prune with an uninitialized submodule present (must complete cleanly) =="
+prune2_out="$(cd "$PRUNE2" && "$CH" task prune-run)" || { echo "FAIL: prune must not fail with an uninitialized submodule present" >&2; printf '%s\n' "$prune2_out" >&2; exit 1; }
+(cd "$PRUNE2" && git rev-parse -q --verify refs/heads/feat/merged >/dev/null) && { echo "FAIL: merged branch survived prune" >&2; exit 1; }
+(cd "$PRUNE2" && git rev-parse -q --verify refs/heads/feat/wip >/dev/null) || { echo "FAIL: unmerged branch was pruned" >&2; exit 1; }
+[ -d "$PRUNE2/gap" ] || { echo "FAIL: the uninitialized submodule dir must remain" >&2; exit 1; }
+echo "   mode=prune completed cleanly; unmerged kept, merged reaped, uninitialized dir intact"
+
+echo "gate-task: PASS — command:task + all five maintenance verbs executed live against charly $CHARLY_REF"

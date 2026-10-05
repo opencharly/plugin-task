@@ -105,7 +105,10 @@ alone cannot see). A branch carrying commits *beyond* a merged head, or a worktr
 modified tracked files, is never touched. If `gh` is unavailable (no auth, offline), it
 prunes strictly *less*; `local_only: true` skips GitHub entirely and prunes only
 ancestry-merged branches. `include_closed: true` additionally reaps abandoned CLOSED-PR
-worktrees. `base` defaults to `origin/main`.
+worktrees. `base` defaults to `origin/main`. A submodule is swept only when it is an
+INITIALIZED checkout — an uninitialized one contributes nothing, because `git -C` on it
+would walk up and resolve to the project itself, reporting the project's own worktrees
+and branches.
 
 
 ## Authoring a task

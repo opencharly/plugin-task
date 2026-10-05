@@ -397,6 +397,53 @@ func TestPrune_SubmoduleSwept(t *testing.T) {
 	}
 }
 
+// TestPrune_UninitializedSubmoduleIsNeverSwept is the regression for
+// plugin-task#16 — the charly#768 class, missed in verb:prune. `git -C` only
+// CHANGES DIRECTORY: on a present-but-UNINITIALIZED submodule directory (an empty
+// dir, the normal state of a fresh `git worktree` before `submodule update
+// --init`) git WALKS UP to the enclosing repository, so every `worktree list` /
+// `for-each-ref` / `branch -D` the sweep makes through that path reads and
+// MUTATES the PROJECT itself. Before the fix pruneRepos accepted any existing
+// directory, so the project's own worktrees and branches — including another
+// session's — were reported prunable once per uninitialized submodule, and
+// `mode=prune` Pass 2 reached `git branch -D` on them. This test FAILS on that
+// code.
+func TestPrune_UninitializedSubmoduleIsNeverSwept(t *testing.T) {
+	proj := newPruneProject(t)
+
+	// Declare a SECOND submodule that is never `submodule update --init`-ed, then
+	// materialize its path as an EMPTY directory — exactly the fresh-worktree state.
+	const uninit = "subuninit"
+	pruneGit(t, proj, "config", "-f", ".gitmodules", "submodule."+uninit+".path", uninit)
+	pruneGit(t, proj, "config", "-f", ".gitmodules", "submodule."+uninit+".url",
+		filepath.Join(filepath.Dir(proj), "nowhere.git"))
+	if err := os.MkdirAll(filepath.Join(proj, uninit), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// pruneRepos must never hand the sweep a path that walks up to the project.
+	for _, r := range pruneRepos(proj) {
+		if filepath.Base(r) == uninit {
+			t.Fatalf("pruneRepos must EXCLUDE the uninitialized submodule %q "+
+				"(git -C on it walks up to the superproject), got %q", uninit, r)
+		}
+	}
+
+	st, msg := runMaintenanceVerbIn(proj, "prune", map[string]any{"mode": "report"})
+	if st != spec.StatusPass {
+		t.Fatalf("report status: %s: %s", st, msg)
+	}
+	// Nothing in the report may be attributed to the uninitialized submodule: every
+	// target the walk-up would surface belongs to the PROJECT, not to it.
+	for _, line := range strings.Split(msg, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && (f[0] == "worktree" || f[0] == "branch") && f[1] == uninit {
+			t.Fatalf("the report attributed a SUPERPROJECT target to the "+
+				"uninitialized submodule %q:\n%s", uninit, line)
+		}
+	}
+}
+
 // TestGHListPRsForDir_Live exercises the REAL gh shell-out / URL->slug / JSON-decode
 // / branch-keying path (ghListPRsForDir) against the actual opencharly/plugin-task
 // repo. R7a: LIVE against the real service, or SKIP cleanly when `gh` is
