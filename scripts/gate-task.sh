@@ -73,6 +73,24 @@ failtask:
       - run: this fails
         command: "false"
         context: [deploy]
+leafreason:
+  task:
+    description: a leaf task whose failing step carries a REASON on stderr
+    plan:
+      - run: the leaf step (its Message is the reason)
+        command: |
+          echo "leaf-reason: boom on stderr" >&2
+          echo "leaf-reason: boom on stdout"
+          exit 3
+        context: [deploy]
+composite:
+  task:
+    description: a composite task nesting leafreason behind one task hop
+    plan:
+      - run: the outer step (a nested task step)
+        task:
+          task: leafreason
+        context: [deploy]
 YML
 cd "$PROJ"
 
@@ -82,6 +100,30 @@ greet_out="$("$CH" task greet)"; echo "$greet_out" | grep -q '0 failed' || { ech
 if "$CH" task failtask; then echo "FAIL: a failing task must exit non-zero" >&2; exit 1; fi
 json="$("$CH" task failtask --json 2>&1 || true)"
 echo "$json" | grep -q '"failed": 1' || { echo "FAIL: --json report missing the tally" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# 1b) The nested `task:` hop carries a failing step's OWN message (plugin-task#12).
+# The leaf's reason is destroyed at the hop unless the hop renders it: only the
+# task-level Message crosses (the single CheckResult has no field for nested steps),
+# and the top level already prints every step line. So this arm asserts the reason
+# reaches the COMPOSITE's verdict — the live proof the unit tests cannot give.
+# ---------------------------------------------------------------------------
+echo "== verb:task nested hop (a composite must carry the leaf step's own reason) =="
+leaf_out="$("$CH" task leafreason 2>&1 || true)"
+echo "$leaf_out" | grep -q 'leaf-reason: boom on stderr' || {
+  echo "FAIL: the leaf, run directly, must show its own reason" >&2; printf '%s\n' "$leaf_out" >&2; exit 1; }
+comp_out="$("$CH" task composite 2>&1 || true)"
+if "$CH" task composite >/dev/null 2>&1; then
+  echo "FAIL: the composite must exit non-zero" >&2; exit 1
+fi
+echo "$comp_out" | grep -q 'leaf-reason: boom on stderr' || {
+  echo "FAIL: the composite dropped the leaf step's own reason across the task: hop (plugin-task#12)" >&2
+  printf '%s\n' "$comp_out" >&2; exit 1; }
+echo "$comp_out" | grep -q 'the leaf step (its Message is the reason)' || {
+  echo "FAIL: the composite must name the failing step's PATH, not just its reason" >&2
+  printf '%s\n' "$comp_out" >&2; exit 1; }
+echo "   the composite carried the leaf step's reason AND its path across the hop"
+
 # ---------------------------------------------------------------------------
 # 2) The generic maintenance verbs, each exercised LIVE on a real git fixture.
 # ---------------------------------------------------------------------------
