@@ -187,10 +187,12 @@ func submoduleGitlink(projDir, path, subpath string) string {
 //	verify — assert every pin_map entry equals pinned_from's twin (policy B), then
 //	         audit every `.gitmodules` path's CHECKOUT: an initialized submodule
 //	         must be clean and its HEAD must equal its recorded gitlink, read
-//	         through submoduleAt's walk-up-safe form (charly#768). An UNINITIALIZED
-//	         path (declared, no checkout) is CLASSIFIED and reported in the Message,
-//	         never silently skipped and never counted as a clean checkout; its pin
-//	         is still covered by the gitlink assertion.
+//	         through submoduleAt's walk-up-safe form (charly#768). The recorded
+//	         GITLINK is read for EVERY declared path, before the checkout is
+//	         classified (an index read needs no checkout), so a path declared with
+//	         no gitlink FAILS. An UNINITIALIZED path (declared, a gitlink, no
+//	         checkout) is CLASSIFIED and reported in the Message, never silently
+//	         skipped and never counted as a clean checkout.
 func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status, string) {
 	paths, err := submodulePaths(projDir)
 	if err != nil {
@@ -341,22 +343,25 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		// the enclosing superproject's HEAD.
 		//
 		// An UNINITIALIZED path is CLASSIFIED, never silently skipped: there is no
-		// checkout to audit, so it is counted and named in the Message, and its pin
-		// is still asserted by the index gitlink read below. A session worktree
-		// initializes no submodule at all, so calling that a FAILURE would make the
-		// gate unrunnable exactly where it is meant to run; the Message — the only
-		// channel that survives the pass path — carries the coverage instead.
+		// checkout to audit, so it is counted and named in the Message. Its PIN is
+		// audited FIRST, for every declared path — the index read needs no checkout —
+		// so a path declared in `.gitmodules` with no recorded gitlink FAILS here
+		// rather than passing as "uninitialized (pin audited)". A session worktree
+		// initializes no submodule at all, so calling the MISSING CHECKOUT alone a
+		// FAILURE would make the gate unrunnable exactly where it is meant to run;
+		// the Message — the only channel that survives the pass path — carries the
+		// coverage instead.
 		var uninitialized []string
 		checked := 0
 		for _, p := range paths {
-			_, gitArgs, aerr := submoduleAt(projDir, p)
-			if aerr != nil {
-				uninitialized = append(uninitialized, p)
-				continue
-			}
 			rec := gitlink(projDir, p)
 			if rec == "" {
 				failures = append(failures, fmt.Sprintf("%s: no gitlink recorded in the index", p))
+				continue
+			}
+			_, gitArgs, aerr := submoduleAt(projDir, p)
+			if aerr != nil {
+				uninitialized = append(uninitialized, p)
 				continue
 			}
 			if dirty, _, _ := hostCapture(context.Background(), projDir,

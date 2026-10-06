@@ -143,8 +143,11 @@ func TestGitSubmodules_VerifyPolicyB(t *testing.T) {
 // checkout must be CLEAN and its HEAD must BE the recorded gitlink, read
 // walk-up-safely through submoduleAt (charly#768); an uninitialized path is
 // CLASSIFIED (named in the Message), never silently skipped and never counted as a
-// clean checkout. This test FAILS on the pre-fix code, whose `verify` arm compared
-// only pin_map gitlinks and never read a submodule's worktree.
+// clean checkout — but its PIN is still audited, because the index gitlink read
+// needs no checkout, so a declared path with NO recorded gitlink FAILS rather than
+// passing as "uninitialized (pin audited)". This test FAILS on the pre-fix code,
+// whose `verify` arm compared only pin_map gitlinks and never read a submodule's
+// worktree.
 func TestGitSubmodules_VerifyCheckoutAudit(t *testing.T) {
 	dir := t.TempDir()
 	run := gitRepo(t, dir)
@@ -212,6 +215,29 @@ func TestGitSubmodules_VerifyCheckoutAudit(t *testing.T) {
 	}
 	if !strings.Contains(msg, "sub: HEAD "+drift+" != gitlink "+subSHA) {
 		t.Fatalf("the failure must name the drift, got: %q", msg)
+	}
+
+	// FAIL: a path DECLARED in `.gitmodules` with NO recorded gitlink must fail —
+	// including when it has no checkout. `git ls-files -s` is an index read that
+	// needs no worktree, so "uninitialized" must never become a way for an
+	// unaudited pin to pass. `sub` is put back at its gitlink first, so this is the
+	// only failure in the run.
+	subRun("checkout", "-q", subSHA)
+	writeFile(t, filepath.Join(dir, ".gitmodules"),
+		"[submodule \"sub\"]\n\tpath = sub\n\turl = u\n\tbranch = main\n"+
+			"[submodule \"ghostmod\"]\n\tpath = ghostmod\n\turl = u\n\tbranch = main\n"+
+			"[submodule \"nopin\"]\n\tpath = nopin\n\turl = u\n\tbranch = main\n")
+	run("add", ".gitmodules")
+	run("commit", "-qm", "declare nopin with no gitlink")
+	st, msg = runMaintenanceVerbIn(dir, "git-submodules", map[string]any{"mode": "verify"})
+	if st != spec.StatusFail {
+		t.Fatalf("a declared path with no recorded gitlink must fail, got %s: %s", st, msg)
+	}
+	if !strings.Contains(msg, "nopin: no gitlink recorded in the index") {
+		t.Fatalf("the failure must name the unrecorded path, got: %q", msg)
+	}
+	if strings.Contains(msg, "uninitialized") {
+		t.Fatalf("a path with no recorded gitlink must never be reported as an audited pin, got: %q", msg)
 	}
 }
 
