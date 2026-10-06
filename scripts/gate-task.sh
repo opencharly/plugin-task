@@ -28,6 +28,15 @@ trap 'rm -rf "$WORK"' EXIT
 echo "== fetching charly $CHARLY_REF (compiles candy/plugin-task in) =="
 git clone --depth 1 --branch "$CHARLY_REF" https://github.com/opencharly/charly.git "$WORK/charly" 2>&1 | tail -1
 
+# --- the coherence gate: charly's own pins must LEAD the working tree's ---------
+# The `-replace` below puts the working tree's requires into the module graph, and MVS
+# takes the max, so a charly ref that lags raises sdk/spec past the sibling plugins'
+# APIs and the build dies in plugin-box/plugin-build/plugin-cmd, far from the cause.
+# Assert the ordering here — BEFORE the build — so a lapse names itself in one line.
+# ONE implementation, two callers: this is scripts/check-coherence.sh, shared with the
+# CI `coherence` job, which runs the same control against charly `main` over HTTP (R3).
+"$ROOT/scripts/check-coherence.sh" "$WORK/charly/charly/go.mod" "$PLUGIN_DIR/go.mod" "charly $CHARLY_REF"
+
 export GOTMPDIR="${GOTMPDIR:-$(mktemp -d)}"
 export GOWORK=off
 export GOFLAGS=-mod=mod
