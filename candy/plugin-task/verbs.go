@@ -184,8 +184,13 @@ func submoduleGitlink(projDir, path, subpath string) string {
 //	status — print PATH BRANCH PIN [DIRTY] for every submodule
 //	bump   — for pin_map entries, set the gitlink to pinned_from's twin; for the
 //	         rest, roll to their own default-branch HEAD; never a PR branch
-//	verify — assert every pin_map entry equals pinned_from's twin (policy B) and
-//	         every submodule is clean + at its recorded gitlink
+//	verify — assert every pin_map entry equals pinned_from's twin (policy B), then
+//	         audit every `.gitmodules` path's CHECKOUT: an initialized submodule
+//	         must be clean and its HEAD must equal its recorded gitlink, read
+//	         through submoduleAt's walk-up-safe form (charly#768). An UNINITIALIZED
+//	         path (declared, no checkout) is CLASSIFIED and reported in the Message,
+//	         never silently skipped and never counted as a clean checkout; its pin
+//	         is still covered by the gitlink assertion.
 func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status, string) {
 	paths, err := submodulePaths(projDir)
 	if err != nil {
@@ -306,24 +311,80 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		return spec.StatusPass, fmt.Sprintf("bumped %d submodule pin(s): %s", len(done), strings.Join(done, ", "))
 
 	case "verify":
+		// Half 1 — policy B: every pin_map entry must equal pinned_from's twin.
+		// Every failure is COLLECTED (never a first-match return) so one run names
+		// all of them; the failures are sorted for a stable message.
+		var failures []string
 		for upath, cpath := range in.PinMap {
 			want := submoduleGitlink(projDir, in.PinnedFrom, cpath)
 			got := gitlink(projDir, upath)
 			// A MISSING gitlink on either side must FAIL — never compare empty to
 			// empty and report a vacuous policy-B pass.
 			if want == "" {
-				return spec.StatusFail, fmt.Sprintf("no gitlink for %q in %q", cpath, in.PinnedFrom)
+				failures = append(failures, fmt.Sprintf("no gitlink for %q in %q", cpath, in.PinnedFrom))
+				continue
 			}
 			if got == "" {
-				return spec.StatusFail, fmt.Sprintf("no umbrella gitlink at %q", upath)
+				failures = append(failures, fmt.Sprintf("no umbrella gitlink at %q", upath))
+				continue
 			}
 			if want != got {
-				return spec.StatusFail, fmt.Sprintf("pin mismatch: %s (%s) != %s's %s (%s)",
-					upath, got, in.PinnedFrom, cpath, want)
+				failures = append(failures, fmt.Sprintf("pin mismatch: %s (%s) != %s's %s (%s)",
+					upath, got, in.PinnedFrom, cpath, want))
 			}
 		}
-		return spec.StatusPass, fmt.Sprintf("verify: %d policy pin(s) hold across %d submodule(s)",
-			len(in.PinMap), len(paths))
+		// Half 2 — the checkout audit the doc comment promises, over EVERY
+		// `.gitmodules` path: the recorded gitlink must be present in the index, and
+		// where a checkout exists it must be CLEAN and its HEAD must BE that gitlink.
+		// Reads go through submoduleAt's walk-up-safe `--git-dir`/`--work-tree` form
+		// (charly#768), so a present-but-uninitialized directory can never resolve to
+		// the enclosing superproject's HEAD.
+		//
+		// An UNINITIALIZED path is CLASSIFIED, never silently skipped: there is no
+		// checkout to audit, so it is counted and named in the Message, and its pin
+		// is still asserted by the index gitlink read below. A session worktree
+		// initializes no submodule at all, so calling that a FAILURE would make the
+		// gate unrunnable exactly where it is meant to run; the Message — the only
+		// channel that survives the pass path — carries the coverage instead.
+		var uninitialized []string
+		checked := 0
+		for _, p := range paths {
+			_, gitArgs, aerr := submoduleAt(projDir, p)
+			if aerr != nil {
+				uninitialized = append(uninitialized, p)
+				continue
+			}
+			rec := gitlink(projDir, p)
+			if rec == "" {
+				failures = append(failures, fmt.Sprintf("%s: no gitlink recorded in the index", p))
+				continue
+			}
+			if dirty, _, _ := hostCapture(context.Background(), projDir,
+				fmt.Sprintf("git %s status --porcelain", gitArgs)); strings.TrimSpace(dirty) != "" {
+				failures = append(failures, fmt.Sprintf("%s: dirty working tree", p))
+				continue
+			}
+			head, _, _ := hostCapture(context.Background(), projDir,
+				fmt.Sprintf("git %s rev-parse HEAD", gitArgs))
+			if h := strings.TrimSpace(head); h != rec {
+				failures = append(failures, fmt.Sprintf("%s: HEAD %s != gitlink %s", p, h, rec))
+				continue
+			}
+			checked++
+		}
+		if len(failures) > 0 {
+			sort.Strings(failures)
+			return spec.StatusFail, fmt.Sprintf("verify: %d failure(s): %s",
+				len(failures), strings.Join(failures, "; "))
+		}
+		msg := fmt.Sprintf("verify: %d policy pin(s) hold across %d submodule(s); %d checkout(s) clean at their gitlink",
+			len(in.PinMap), len(paths), checked)
+		if len(uninitialized) > 0 {
+			sort.Strings(uninitialized)
+			msg += fmt.Sprintf("; %d uninitialized (pin audited, no checkout): %s",
+				len(uninitialized), strings.Join(uninitialized, ", "))
+		}
+		return spec.StatusPass, msg
 
 	default:
 		return spec.StatusFail, fmt.Sprintf("git-submodules: unknown mode %q", in.Mode)

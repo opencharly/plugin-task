@@ -138,6 +138,83 @@ func TestGitSubmodules_VerifyPolicyB(t *testing.T) {
 	}
 }
 
+// TestGitSubmodules_VerifyCheckoutAudit pins the clause the doc comment promised
+// but the code never performed (plugin-task#10): for every `.gitmodules` path the
+// checkout must be CLEAN and its HEAD must BE the recorded gitlink, read
+// walk-up-safely through submoduleAt (charly#768); an uninitialized path is
+// CLASSIFIED (named in the Message), never silently skipped and never counted as a
+// clean checkout. This test FAILS on the pre-fix code, whose `verify` arm compared
+// only pin_map gitlinks and never read a submodule's worktree.
+func TestGitSubmodules_VerifyCheckoutAudit(t *testing.T) {
+	dir := t.TempDir()
+	run := gitRepo(t, dir)
+
+	// A real nested checkout at `sub`, sitting at its own commit.
+	subDir := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	subRun := gitRepo(t, subDir)
+	writeFile(t, filepath.Join(subDir, "README"), "hello\n")
+	subRun("add", "-A")
+	subRun("commit", "-qm", "sub init")
+	subSHA := subRun("rev-parse", "HEAD")
+
+	writeFile(t, filepath.Join(dir, ".gitmodules"),
+		"[submodule \"sub\"]\n\tpath = sub\n\turl = u\n\tbranch = main\n"+
+			"[submodule \"ghostmod\"]\n\tpath = ghostmod\n\turl = u\n\tbranch = main\n")
+	run("add", ".gitmodules")
+	// Record both gitlinks directly (no network / no nested clone): `sub` HAS a
+	// checkout, `ghostmod` does NOT (its directory is never created — the empty-dir
+	// state a fresh `git worktree add` leaves).
+	writeGitlink := func(path, sha string) {
+		t.Helper()
+		cmd := exec.Command("git", "-C", dir, "update-index", "--add", "--cacheinfo", "160000,"+sha+","+path)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("update-index %s: %v\n%s", path, err, out)
+		}
+	}
+	writeGitlink("sub", subSHA)
+	writeGitlink("ghostmod", subSHA)
+	run("commit", "-qm", "gitlinks")
+
+	// PASS: `sub` is clean and at its gitlink; `ghostmod` is uninitialized and must
+	// be CLASSIFIED in the Message (the channel that survives the pass path).
+	st, msg := runMaintenanceVerbIn(dir, "git-submodules", map[string]any{"mode": "verify"})
+	if st != spec.StatusPass {
+		t.Fatalf("a clean checkout at its gitlink must pass: %s: %s", st, msg)
+	}
+	if !strings.Contains(msg, "1 checkout(s) clean at their gitlink") {
+		t.Fatalf("the Message must report checkout coverage, got: %q", msg)
+	}
+	if !strings.Contains(msg, "uninitialized") || !strings.Contains(msg, "ghostmod") {
+		t.Fatalf("an uninitialized path must be classified (named) in the Message, got: %q", msg)
+	}
+
+	// FAIL: a DIRTY checkout must fail, naming the path.
+	writeFile(t, filepath.Join(subDir, "README"), "dirty\n")
+	st, msg = runMaintenanceVerbIn(dir, "git-submodules", map[string]any{"mode": "verify"})
+	if st != spec.StatusFail {
+		t.Fatalf("a dirty checkout must fail, got %s: %s", st, msg)
+	}
+	if !strings.Contains(msg, "sub: dirty working tree") {
+		t.Fatalf("the failure must name the dirty path, got: %q", msg)
+	}
+
+	// FAIL: a checkout whose HEAD drifted off its gitlink must fail, naming both.
+	subRun("checkout", "--", "README")
+	subRun("commit", "-q", "--allow-empty", "-m", "drift")
+	drift := subRun("rev-parse", "HEAD")
+	st, msg = runMaintenanceVerbIn(dir, "git-submodules", map[string]any{"mode": "verify"})
+	if st != spec.StatusFail {
+		t.Fatalf("a checkout off its gitlink must fail, got %s: %s", st, msg)
+	}
+	if !strings.Contains(msg, "sub: HEAD "+drift+" != gitlink "+subSHA) {
+		t.Fatalf("the failure must name the drift, got: %q", msg)
+	}
+}
+
 // TestGitSubmodules_UnknownMode proves an unknown mode fails loudly.
 func TestGitSubmodules_UnknownMode(t *testing.T) {
 	dir := t.TempDir()
