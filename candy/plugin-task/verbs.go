@@ -443,6 +443,51 @@ func pinSubmodule(projDir, path, ref string) (spec.Status, string) {
 		fmt.Sprintf("git add %s", shellQuote(path))); exit != 0 {
 		return spec.StatusFail, fmt.Sprintf("stage %s failed: %s", path, strings.TrimSpace(stderr))
 	}
+	// RECONCILE THE SUBMODULE'S OWN CHECKOUTS (plugin-task#11). Advancing this
+	// submodule's gitlink moves the PIN; it does not move the submodule's OWN
+	// initialized nested checkouts, which stay at the gitlinks the OLD commit
+	// recorded — so the shared tree goes dirty (` M <nested>`) and
+	// `git-submodules verify` then fails twice over, on a change this very bump just
+	// made. The reconciliation is recursive (a nested checkout can itself nest) and a
+	// failure to complete it is a hard error: a bump that leaves the tree dirty is
+	// worse than a bump that refuses.
+	if st, msg := reconcileNestedCheckouts(projDir, path); st != spec.StatusPass {
+		return st, msg
+	}
+	return spec.StatusPass, ""
+}
+
+// reconcileNestedCheckouts brings a just-pinned submodule's OWN nested checkouts back
+// onto the gitlinks its new commit records — the state `verify` demands.
+//
+// GUARDED twice over, and both guards are load-bearing:
+//   - a submodule with no `.gitmodules` is UNTOUCHED — a plain file test, no git call, no
+//     network, no new failure mode for the majority of submodules;
+//   - the update is `--recursive` WITHOUT `--init`: it moves the nested checkouts that are
+//     ALREADY INITIALIZED — exactly what the issue reports going stale — and never
+//     initializes a nested submodule the operator did not ask for. That matters beyond
+//     tidiness: `--init` would fetch nested remotes on every bump (including file-protocol
+//     fixtures, which would need a protocol loosening this verb must not bake in), and a
+//     bump is not the place to grow the checkout. The recursion is still there because a
+//     nested checkout can itself nest.
+//
+// A reconcile that cannot complete is a hard error, not a warning: a bump that leaves the
+// tree dirty is worse than a bump that refuses (this is the defect itself).
+func reconcileNestedCheckouts(projDir, path string) (spec.Status, string) {
+	abs, _, aerr := submoduleAt(projDir, path)
+	if aerr != nil {
+		return spec.StatusFail, aerr.Error()
+	}
+	if _, _, exit := hostCapture(context.Background(), projDir,
+		fmt.Sprintf("test -f %s", shellQuote(filepath.Join(abs, ".gitmodules")))); exit != 0 {
+		return spec.StatusPass, ""
+	}
+	if _, stderr, exit := hostCapture(context.Background(), projDir,
+		fmt.Sprintf("git -C %s submodule update --recursive", shellQuote(abs))); exit != 0 {
+		return spec.StatusFail, fmt.Sprintf(
+			"reconcile %s: nested checkout update failed: %s (the gitlink moved but its initialized nested checkouts did not, which leaves the tree dirty and `verify` failing)",
+			path, strings.TrimSpace(stderr))
+	}
 	return spec.StatusPass, ""
 }
 
