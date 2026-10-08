@@ -250,12 +250,17 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 	for _, s := range in.Skip {
 		skipped[s] = true
 	}
-	// Pre-flight the uninitialized gitlinks into `skipped` (charly#864): both phases already bypass
-	// anything in this map, so no phase performs a git operation in a directory whose checkout is
-	// absent - the walk-up hazard charly#768 fixed stays closed - and the condition is reported once
-	// by the caller rather than once per path.
-	for _, p := range uninit {
-		skipped[p] = true
+	// Pre-flight the uninitialized gitlinks into `skipped` for BUMP ONLY (charly#864), the mode whose
+	// intent is to advance pins: both bump phases already bypass anything in this map, so neither
+	// performs a git operation in a directory whose checkout is absent - the walk-up hazard
+	// charly#768 fixed stays closed - and the condition is reported once by the caller rather than
+	// once per path. Scoped to `bump` explicitly: `status` and `verify` do not consult `skipped` at
+	// all, and leaving them untouched is the point - `status` still reports the gitlink as a marker
+	// and `verify` still judges policy.
+	if in.Mode == "bump" {
+		for _, p := range uninit {
+			skipped[p] = true
+		}
 	}
 
 	switch in.Mode {
