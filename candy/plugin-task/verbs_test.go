@@ -606,6 +606,120 @@ func TestGitSubmodules_BumpUninitializedFailsLoud(t *testing.T) {
 	}
 }
 
+func TestGitSubmodules_BumpReportsUninitializedOnce(t *testing.T) {
+	base := t.TempDir()
+
+	// A leaf submodule SOURCE with two commits (so there is a real ref to switch to).
+	leaf := filepath.Join(base, "leaf")
+	run := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	mustGitMay := func(dir string, args ...string) (string, bool) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		out, err := cmd.CombinedOutput()
+		return strings.TrimSpace(string(out)), err == nil
+	}
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(leaf, "init", "-q", "-b", "main")
+	writeFile(t, filepath.Join(leaf, "f"), "L1")
+	run(leaf, "add", "-A")
+	run(leaf, "commit", "-qm", "L1")
+	leafBare := filepath.Join(base, "leaf.git")
+	run(base, "clone", "-q", "--bare", leaf, leafBare)
+
+	// umb declares the submodule `target` in .gitmodules but NEVER initializes it:
+	// the directory exists and is EMPTY (the exact post-`git worktree add` state).
+	umb := filepath.Join(base, "umb")
+	if err := os.MkdirAll(umb, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(umb, "init", "-q", "-b", "main")
+	writeFile(t, filepath.Join(umb, "u"), "u")
+	run(umb, "add", "-A")
+	run(umb, "commit", "-qm", "u")
+	writeFile(t, filepath.Join(umb, ".gitmodules"),
+		"[submodule \"target\"]\n\tpath = target\n\turl = "+leafBare+"\n\tbranch = main\n")
+	run(umb, "add", ".gitmodules")
+	run(umb, "commit", "-qm", "gitmodules")
+	// Stage a bogus gitlink for `target` and create the EMPTY dir (no .git).
+	head := run(umb, "rev-parse", "HEAD")
+	if out, ok := mustGitMay(umb, "update-index", "--add", "--cacheinfo", "160000,"+head+",target"); !ok {
+		t.Fatalf("update-index: %s", out)
+	}
+	run(umb, "commit", "-qm", "staged gitlink")
+	if err := os.MkdirAll(filepath.Join(umb, "target"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(umb, "target", ".git")); err == nil {
+		t.Fatalf("fixture precondition: target must have no .git")
+	}
+	// Give the UMBRELLA an `origin` with an `origin/main` ref, so that pre-fix the
+	// `git -C target switch --detach origin/main` walk-up would GENUINELY switch the
+	// umbrella (the real charly#768 regression) rather than erroring out.
+	umbOrigin := filepath.Join(base, "umb-origin.git")
+	run(base, "clone", "-q", "--bare", umb, umbOrigin)
+	run(umb, "remote", "add", "origin", umbOrigin)
+	run(umb, "fetch", "-q", "origin")
+	run(umb, "branch", "--set-upstream-to=origin/main", "main")
+
+	// Record the UMBRELLA's own HEAD+branch BEFORE the bump, to prove it is untouched.
+	umbHeadBefore := run(umb, "rev-parse", "HEAD")
+	umbBranchBefore := run(umb, "rev-parse", "--abbrev-ref", "HEAD")
+
+	// bump over the WHOLE module set (no pin_map) — `target` rolls to origin/main.
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
+	if st != spec.StatusFail {
+		t.Fatalf("bump over an uninitialized submodule must FAIL LOUD, got %s: %s", st, msg)
+	}
+	// THE COLLAPSE, asserted so this test FAILS on the pre-change tree: there the message was
+	// "bumped ...; 1 FAILED: submodule %q is not an initialized checkout" - a per-path failure list.
+	// The phrase below ("N submodule(s) not an initialized checkout (name)") is new, and the FAILED
+	// list is gone, so neither assertion can pass before this change.
+	if !strings.Contains(msg, "1 submodule(s) not an initialized checkout") {
+		t.Fatalf("the count must be reported once, in the new form; got: %s", msg)
+	}
+	if !strings.Contains(msg, "(target)") {
+		t.Fatalf("the report must NAME the uninitialized paths; got: %s", msg)
+	}
+	if strings.Contains(msg, "FAILED") {
+		t.Fatalf("the per-path failure list must be gone (one report, not N failures); got: %s", msg)
+	}
+	if n := strings.Count(msg, "not an initialized checkout"); n != 1 {
+		t.Fatalf("the condition must be reported exactly ONCE, got %d occurrences: %s", n, msg)
+	}
+
+	// THE REGRESSION ASSERTION: the umbrella must be EXACTLY where it was — same
+	// HEAD, same branch. Pre-fix, `git -C target switch --detach origin/main` walked
+	// up and detached the umbrella.
+	if got := run(umb, "rev-parse", "HEAD"); got != umbHeadBefore {
+		t.Fatalf("umbrella HEAD moved: %s -> %s", umbHeadBefore, got)
+	}
+	if got := run(umb, "rev-parse", "--abbrev-ref", "HEAD"); got != umbBranchBefore {
+		t.Fatalf("umbrella branch changed: %q -> %q (the walk-up detach regression)", umbBranchBefore, got)
+	}
+	// The gating: the SAME tree in `status` mode must still succeed and still carry its marker -
+	// the injection is scoped to bump, and status never consults `skipped`.
+	stStatus, msgStatus := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "status"})
+	if stStatus == spec.StatusFail {
+		t.Fatalf("status must not fail on an uninitialized gitlink; got: %s", msgStatus)
+	}
+	if !strings.Contains(msgStatus, "uninitialized") {
+		t.Fatalf("status must still mark the uninitialized gitlink; got: %s", msgStatus)
+	}
+}
+
 // TestSubmoduleAt proves the guard's contract directly: an initialized submodule
 // yields a walk-up-safe --git-dir/--work-tree pair; a bare/uninitialized dir errors.
 func TestSubmoduleAt(t *testing.T) {
