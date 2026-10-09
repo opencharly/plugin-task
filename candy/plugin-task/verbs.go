@@ -193,7 +193,55 @@ func submoduleGitlink(projDir, path, subpath string) string {
 //	         no gitlink FAILS. An UNINITIALIZED path (declared, a gitlink, no
 //	         checkout) is CLASSIFIED and reported in the Message, never silently
 //	         skipped and never counted as a clean checkout.
+//
+// uninitializedSubmodules returns the submodule PATHS whose checkout is absent - the normal state of
+// a freshly created `git worktree` that has not run `git submodule update --init`.
+//
+// It performs NO git operation inside those directories, so it cannot trigger the walk-up hazard the
+// submoduleAt guard exists to prevent (charly#768); it decides purely on the presence of the
+// submodule's own .git, exactly as submoduleAt does before it refuses.
+func uninitializedSubmodules(projDir string, paths []string) []string {
+	var uninit []string
+	for _, p := range paths {
+		if _, statErr := os.Stat(filepath.Join(projDir, p, ".git")); statErr != nil {
+			uninit = append(uninit, p)
+		}
+	}
+	return uninit
+}
+
+// runGitSubmodules runs the verb and states the pre-flight's finding (charly#864).
+//
+// An uninitialized gitlink has no pin to advance, so it is NOT one of the per-path failures the walk
+// records and continues past (plugin-task#13) - it is a PRECONDITION: reported ONCE, with the command
+// that repairs it, instead of failing once per path. The run still FAILS LOUD (the invariant
+// TestGitSubmodules_BumpUninitializedFailsLoud pins, and the reason charly#768 exists): a sync over a
+// tree it could not fully advance must never report success, and must never touch the umbrella.
+// Pins that CAN advance still do, so one uninitialized sibling does not strand them.
 func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status, string) {
+	paths, err := submodulePaths(projDir)
+	if err != nil {
+		return spec.StatusFail, err.Error()
+	}
+	uninit := uninitializedSubmodules(projDir, paths)
+	status, msg := runGitSubmodulesInner(projDir, in, uninit)
+	// ONLY `bump` fails loud on it. `status` is DESIGNED to report an uninitialized gitlink as a
+	// marker and succeed - it has nothing to advance and is the mode an operator uses to SEE the
+	// state (TestGitSubmodules_StatusUninitializedMarker pins that) - and `verify` judges policy, not
+	// checkout availability. Narrowing this to the one mode whose intent is to advance pins is what
+	// keeps those two behaviours exactly as they were.
+	if in.Mode == "bump" && len(uninit) > 0 {
+		// Same VOCABULARY as the guard itself ("not an initialized checkout"), because that phrase is
+		// what every existing reader of this failure matches on - including the regression test that
+		// pins charly#768 - plus the two things it never said: HOW MANY, and which ones.
+		msg += fmt.Sprintf("; %d submodule(s) not an initialized checkout (%s): run `git submodule update --init`",
+			len(uninit), strings.Join(uninit, ", "))
+		return spec.StatusFail, msg
+	}
+	return status, msg
+}
+
+func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit []string) (spec.Status, string) {
 	paths, err := submodulePaths(projDir)
 	if err != nil {
 		return spec.StatusFail, err.Error()
@@ -201,6 +249,18 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 	skipped := map[string]bool{}
 	for _, s := range in.Skip {
 		skipped[s] = true
+	}
+	// Pre-flight the uninitialized gitlinks into `skipped` for BUMP ONLY (charly#864), the mode whose
+	// intent is to advance pins: both bump phases already bypass anything in this map, so neither
+	// performs a git operation in a directory whose checkout is absent - the walk-up hazard
+	// charly#768 fixed stays closed - and the condition is reported once by the caller rather than
+	// once per path. Scoped to `bump` explicitly: `status` and `verify` do not consult `skipped` at
+	// all, and leaving them untouched is the point - `status` still reports the gitlink as a marker
+	// and `verify` still judges policy.
+	if in.Mode == "bump" {
+		for _, p := range uninit {
+			skipped[p] = true
+		}
 	}
 
 	switch in.Mode {
