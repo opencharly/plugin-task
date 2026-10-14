@@ -301,7 +301,7 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 		// momentarily held superproject `.git/index.lock` failing that path's `git add`
 		// — costs that ONE pin instead of every pin sorted after it. Every failure is
 		// reported together at the end, so the run's own output names all of them.
-		var done, failures []string
+		var done, pinned, failures []string
 		// pinned_from may be an EXTERNAL checkout (`../src`) rather than one of this
 		// project's OWN submodules; only a pinned_from that IS one of `paths` is rolled
 		// by phase 1, so only that case can be judged "did not roll". An external
@@ -361,16 +361,22 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 					failures = append(failures, msg)
 					continue
 				}
-				done = append(done, upath)
+				pinned = append(pinned, upath)
 			}
 		}
 		sort.Strings(done)
+		sort.Strings(pinned)
 		sort.Strings(failures)
+		// FAILURES FIRST, deliberately: the failure list is the actionable part of this message, and the
+		// rolled/pinned name lists are long enough (422 names on a full umbrella) that appending the
+		// diagnostic after them is how it gets truncated away before a reader sees it. A message that
+		// reports what went wrong must lead with it.
 		if len(failures) > 0 {
-			return spec.StatusFail, fmt.Sprintf("bumped %d submodule pin(s): %s; %d FAILED: %s",
-				len(done), strings.Join(done, ", "), len(failures), strings.Join(failures, "; "))
+			return spec.StatusFail, fmt.Sprintf("%d pin(s) FAILED: %s; rolled %d submodule(s) to their default-branch HEAD; pinned %d pin_map entr(y|ies): %s",
+				len(failures), strings.Join(failures, "; "), len(done), len(pinned), strings.Join(pinned, ", "))
 		}
-		return spec.StatusPass, fmt.Sprintf("bumped %d submodule pin(s): %s", len(done), strings.Join(done, ", "))
+		return spec.StatusPass, fmt.Sprintf("pinned %d pin_map entr(y|ies) (%s) after rolling %d submodule(s) to their default-branch HEAD",
+			len(pinned), strings.Join(pinned, ", "), len(done))
 
 	case "verify":
 		// Half 1 — policy B: every pin_map entry must equal pinned_from's twin.
