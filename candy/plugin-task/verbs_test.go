@@ -95,11 +95,11 @@ func TestGitSubmodules_StatusUninitializedMarker(t *testing.T) {
 	}
 }
 
-// TestGitSubmodules_VerifyPolicyB proves the policy-B comparison passes when the
+// TestGitSubmodules_VerifyEdgeHolds proves the EDGE comparison passes when the
 // umbrella gitlink equals the pinned repo's twin, and fails when the twin is
 // MISSING (never a vacuous empty==empty pass). It uses a real gitlink written
 // through `git update-index --cacheinfo` (no nested submodule clone needed).
-func TestGitSubmodules_VerifyPolicyB(t *testing.T) {
+func TestGitSubmodules_VerifyEdgeHolds(t *testing.T) {
 	dir := t.TempDir()
 	run := gitRepo(t, dir)
 	sha := strings.Repeat("a", 40)
@@ -117,7 +117,7 @@ func TestGitSubmodules_VerifyPolicyB(t *testing.T) {
 	// update-index would stage the gitlink's "deletion" (there is no worktree dir).
 	run("add", ".gitmodules")
 	// The umbrella carries a gitlink at `target`; the pinned checkout (this same
-	// repo, ".") carries the SAME gitlink at `target` so policy B holds.
+	// repo, ".") carries the SAME gitlink at `target` so the EDGE holds.
 	writeG("target", sha)
 	run("commit", "-qm", "parent")
 
@@ -126,7 +126,7 @@ func TestGitSubmodules_VerifyPolicyB(t *testing.T) {
 		"mode": "verify", "pinned_from": ".", "pin_map": map[string]any{"target": "target"},
 	})
 	if st != spec.StatusPass {
-		t.Fatalf("matching gitlinks must pass policy B, got %s: %s", st, msg)
+		t.Fatalf("matching gitlinks must hold the edge, got %s: %s", st, msg)
 	}
 
 	// FAIL: a pinned path with NO gitlink must fail loudly (never vacuous).
@@ -422,7 +422,7 @@ func TestRequireVersion(t *testing.T) {
 // the pinned_from repo (`src`) is itself a ROLLING submodule, STALE in the umbrella,
 // and its `inner` gitlink ADVANCES during the bump. The pin_map entry (`target`) must
 // then be pinned from src's NEW gitlink. The reverse order pins target from src's
-// OLD gitlink then advances src, leaving policy B violated.
+// OLD gitlink then advances src, leaving the edge violated.
 func TestGitSubmodules_BumpOrder(t *testing.T) {
 	base := t.TempDir()
 	mustGit := func(dir string, args ...string) string {
@@ -883,7 +883,7 @@ func TestGitSubmodules_BumpContinuesPastFailure(t *testing.T) {
 
 // TestGitSubmodules_BumpRefusesStalePinnedFrom proves the LOAD-BEARING order guard
 // survives the continue-on-failure change: when the pinned_from repo does NOT roll, its
-// gitlinks are the OLD ones, and pinning a pin_map entry from them is the policy-B
+// gitlinks are the OLD ones, and pinning a pin_map entry from them is the EDGE
 // violation that order exists to prevent. Phase 2 must REFUSE and say so — never
 // silently pin from stale data.
 func TestGitSubmodules_BumpRefusesStalePinnedFrom(t *testing.T) {

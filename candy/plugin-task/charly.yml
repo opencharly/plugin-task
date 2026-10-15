@@ -18,7 +18,7 @@ plugin-task:
             Five GENERIC, domain-neutral MAINTENANCE verbs replace repository shell
             scripts, each parameterized by the repo's own data (paths/pairs/pins) so the
             plugin stays reusable by any repository: `verb:git-submodules` (status/bump/
-            verify `.gitmodules` pins, incl. the policy-B comparison of a repo's pins
+            verify `.gitmodules` pins, incl. the EDGE comparison of a repo's pins
             against a pinned checkout's gitlinks), `verb:file-parity` (check/sync that
             paired files are byte-identical), `verb:splice-region` (splice a marked
             region from a fragment into a target), `verb:module-pins` (adopt a

@@ -151,6 +151,80 @@ func submoduleBranch(projDir, path string) string {
 	return strings.TrimSpace(out)
 }
 
+// submoduleURL reads the url declared for path in `.gitmodules`. Empty when the
+// path declares none — the caller reports that rather than probing nothing.
+func submoduleURL(projDir, path string) string {
+	out, _, _ := hostCapture(context.Background(), projDir,
+		fmt.Sprintf("git config -f .gitmodules --get 'submodule.%s.url'", path))
+	return strings.TrimSpace(out)
+}
+
+// resolveUpstreamRef resolves `ref` on `url` to the commit the remote ACTUALLY
+// SERVES, which is the only value a currency claim may rest on: a BRANCH head
+// first, then a TAG. `which` says which namespace answered ("branch" | "tag") and is
+// reported, never assumed — a tag and a branch of one name are different claims.
+//
+// A TAG is read through `--tags` and preferred in its PEELED form (`<ref>^{}`), so an
+// annotated tag yields the COMMIT it names rather than the tag object: comparing a
+// gitlink against a tag object would report every annotated tag as a mismatch.
+//
+// Empty sha means the ref is served by neither namespace — the loud case the caller
+// classifies as a divergence, never as "no information".
+func resolveUpstreamRef(projDir, url, ref string) (sha, which string) {
+	if ref == "" || url == "" {
+		return "", ""
+	}
+	if out, _, exit := hostCapture(context.Background(), projDir,
+		fmt.Sprintf("git ls-remote %s %s", shellQuote(url), shellQuote("refs/heads/"+ref))); exit == 0 {
+		if f := strings.Fields(strings.TrimSpace(out)); len(f) >= 1 {
+			return f[0], "branch"
+		}
+	}
+	out, _, exit := hostCapture(context.Background(), projDir,
+		fmt.Sprintf("git ls-remote --tags %s %s", shellQuote(url), shellQuote(ref)))
+	if exit != 0 {
+		return "", ""
+	}
+	var tag, peeled string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		if strings.HasSuffix(f[1], "^{}") {
+			peeled = f[0]
+			continue
+		}
+		if f[1] == "refs/tags/"+ref {
+			tag = f[0]
+		}
+	}
+	if peeled != "" {
+		return peeled, "tag"
+	}
+	return tag, "tag"
+}
+
+// nestedGitmodulesGet reads `key` (e.g. `submodule.box/arch.branch`) from the `.gitmodules`
+// of the submodule at `src`. That file is the SOURCE repo's OWN pin declaration, and it is
+// what makes an EDGE judgeable one hop further than the source's own gitlink: the edge's
+// target is not "charly" as a whole but charly's pin at the named twin, whose ref is
+// declared there and nowhere else. Empty when the source has no checkout, no .gitmodules,
+// or no such key — the caller reports that rather than guessing a ref.
+func nestedGitmodulesGet(projDir, src, key string) string {
+	abs, _, aerr := submoduleAt(projDir, src)
+	if aerr != nil {
+		return ""
+	}
+	out, _, exit := hostCapture(context.Background(), projDir,
+		fmt.Sprintf("git config -f %s --get %s",
+			shellQuote(filepath.Join(abs, ".gitmodules")), shellQuote(key)))
+	if exit != 0 {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
 // gitlink returns the recorded gitlink SHA for path in ref's tree (“ = worktree index).
 func gitlink(projDir, path string) string {
 	out, _, exit := hostCapture(context.Background(), projDir,
@@ -247,7 +321,8 @@ func submoduleGitlink(projDir, path, subpath string) string {
 //	status — print PATH BRANCH PIN [DIRTY] for every submodule
 //	bump   — for pin_map entries, set the gitlink to pinned_from's twin; for the
 //	         rest, roll to their own default-branch HEAD; never a PR branch
-//	verify — assert every pin_map entry equals pinned_from's twin (policy B), then
+//	verify — assert every derived EDGE holds (each pin_map entry equals pinned_from's
+//	         twin at that path), then
 //	         audit every `.gitmodules` path's CHECKOUT: an initialized submodule
 //	         must be clean and its HEAD must equal its recorded gitlink, read
 //	         through submoduleAt's walk-up-safe form (charly#768). A mismatch is
@@ -309,6 +384,84 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 	return status, msg
 }
 
+// pinKind is what a pin's declared intent RESOLVES to. `pinGraph` classifies it for EVERY
+// path at once, because the depth rule has to be a property of the GRAPH rather than a check
+// at one call site — and a rule kept at a call site is a rule the next edge SHAPE walks
+// around. MEASURED (validator round 2, head 42b76d4): the check read `pinned_from` only, so
+// an explicit `derived-from:<path>` edge whose source was itself an edge was never refused,
+// while schema/task.cue promised a graph acyclic BY CONSTRUCTION.
+type pinKind int
+
+const (
+	// kindUnpinned is also the ZERO value, and that is the safe default: a path the graph has
+	// never seen cannot supply an edge to inherit either, so an unknown source can never be
+	// silently accepted as a leaf.
+	kindUnpinned pinKind = iota // no intent and no `branch=`: unjudgeable, and reported as such
+	kindLeaf                    // `upstream:<ref>`: judged against the REMOTE ref
+	kindEdge                    // `derived-from:<source>`: a `pin_map` entry, or an explicit intent
+)
+
+// pinGraph is every pin's KIND plus, for an EDGE and nothing else, the path it derives from.
+//
+// `source` is written only for kindEdge, so "the source of a leaf" is not expressible in this
+// type: a depth-3 chain is representable here ONLY as an edge whose source is itself a key of
+// `source` — which is exactly the shape the depth rule refuses. The rule therefore lives in
+// the DATA, and a third edge shape added later inherits it instead of having to remember it.
+type pinGraph struct {
+	kind   map[string]pinKind
+	source map[string]string
+	// shape says HOW each of those paths is an edge, so a refusal can name it.
+	shape map[string]string
+}
+
+// edgeRef is one edge and the path it derives from.
+type edgeRef struct{ edge, source string }
+
+// newPinGraph classifies EVERY path ONCE. `intentOf` is the caller's resolution of a path's
+// declared intent (including the implicit `upstream:<branch>` of a `branch=`-carrying
+// `.gitmodules` entry), so the graph and the walk cannot disagree about what a pin means.
+func newPinGraph(paths []string, intentOf func(string) string, in params.GitSubmodulesInput) pinGraph {
+	g := pinGraph{
+		kind:   map[string]pinKind{},
+		source: map[string]string{},
+		shape:  map[string]string{},
+	}
+	for _, p := range paths {
+		it := intentOf(p)
+		switch {
+		case it == "":
+			g.kind[p] = kindUnpinned
+		case strings.HasPrefix(it, "derived-from:"):
+			g.kind[p] = kindEdge
+			g.source[p] = strings.TrimSpace(strings.TrimPrefix(it, "derived-from:"))
+			if twin, viaPinMap := in.PinMap[p]; viaPinMap {
+				g.shape[p] = fmt.Sprintf("a `pin_map` entry (%s -> %s)", p, twin)
+			} else {
+				g.shape[p] = fmt.Sprintf("declares intent %q", it)
+			}
+		default:
+			g.kind[p] = kindLeaf
+		}
+	}
+	return g
+}
+
+// kindOf reports a path's kind. An unclassified path is kindUnpinned, never a leaf.
+func (g pinGraph) kindOf(p string) pinKind { return g.kind[p] }
+
+// edgeSources returns EVERY edge and its source, in the caller's path order. Walking THIS,
+// rather than reading one struct field, is the whole difference between checking the graph
+// and checking a field.
+func (g pinGraph) edgeSources(paths []string) []edgeRef {
+	var out []edgeRef
+	for _, p := range paths {
+		if g.kind[p] == kindEdge {
+			out = append(out, edgeRef{edge: p, source: g.source[p]})
+		}
+	}
+	return out
+}
+
 func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit []string) (spec.Status, string) {
 	paths, err := submodulePaths(projDir)
 	if err != nil {
@@ -361,7 +514,7 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 		// ORDER IS LOAD-BEARING (RDD): roll the non-pinned submodules FIRST — the
 		// pinned_from repo (e.g. "charly") is itself one of them — and only THEN read
 		// its gitlinks to pin the pin_map entries. The reverse order pins from the
-		// pinned repo's OLD HEAD and then advances it, leaving policy B violated after
+		// pinned repo's OLD HEAD and then advances it, leaving the edge violated after
 		// every sync.
 		//
 		// ONE FAILURE NEVER STRANDS THE REST (plugin-task#13): a per-path failure is
@@ -408,12 +561,12 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 		//
 		// A pinned_from that IS one of this project's submodules and did NOT roll (its
 		// roll failed, or it was skipped) is REFUSED as a source: its gitlinks are the
-		// OLD ones, and pinning a pin_map entry from them is exactly the policy-B
+		// OLD ones, and pinning a pin_map entry from them is exactly the EDGE
 		// violation the load-bearing order above exists to prevent. The refusal is
 		// REPORTED, never silent.
 		if !pinnedFromRolled {
 			failures = append(failures, fmt.Sprintf(
-				"refused to pin %d pin_map entr(y|ies): pinned_from %q did not roll, so its gitlinks are stale and pinning from them would violate policy B",
+				"refused to pin %d pin_map entr(y|ies): pinned_from %q did not roll, so its gitlinks are stale and pinning from them would violate the edge the caller declared",
 				len(in.PinMap), in.PinnedFrom))
 		} else {
 			for upath, cpath := range in.PinMap {
@@ -447,7 +600,7 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 			len(pinned), strings.Join(pinned, ", "), len(done))
 
 	case "verify":
-		// Half 1 — policy B: every pin_map entry must equal pinned_from's twin.
+		// Half 1 — the derived EDGE: every pin_map entry must equal pinned_from's twin.
 		// Every failure is COLLECTED (never a first-match return) so one run names
 		// all of them; the failures are sorted for a stable message.
 		var failures []string
@@ -455,7 +608,7 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 			want := submoduleGitlink(projDir, in.PinnedFrom, cpath)
 			got := gitlink(projDir, upath)
 			// A MISSING gitlink on either side must FAIL — never compare empty to
-			// empty and report a vacuous policy-B pass.
+			// empty and report a vacuous EDGE pass.
 			if want == "" {
 				failures = append(failures, fmt.Sprintf("no gitlink for %q in %q", cpath, in.PinnedFrom))
 				continue
@@ -534,6 +687,399 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 				len(uninitialized), strings.Join(uninitialized, ", "))
 		}
 		return spec.StatusPass, msg
+
+	case "currency":
+		// CURRENCY — the question `verify` does not answer (opencharly/charly#936).
+		// `verify` asserts CONSISTENCY: that each checkout matches the gitlink the INDEX
+		// records. A tree can be perfectly consistent while every pin is behind what its
+		// repo serves — MEASURED: `verify` was GREEN while five of six `distro-*` were
+		// behind their remotes. This mode asks the other question and answers it from the
+		// only two objects that can answer it: the recorded gitlink, and the REMOTE.
+		//
+		// It reads NO checkout state, which is deliberate rather than incidental: the
+		// index-vs-checkout seam (opencharly/opencharly#461) cannot arise in a walk that
+		// never compares those two objects, so a currency-aware workflow cannot inherit
+		// that defect by construction. (Ancestry is the ONE exception, and it is reported
+		// as unjudgeable when the objects are absent rather than guessed at.)
+		//
+		// Every pin declares an INTENT, and the intent decides what "current" means:
+		//   * a LEAF (`upstream:<ref>`) is judged against the remote ref — no local state
+		//     enters the answer, so a leaf cannot inherit another repo's staleness;
+		//   * an EDGE (a `pin_map` entry, i.e. derived-from:pinned_from) is judged against
+		//     its SOURCE, and when the source is not current the pin is
+		//     `blocked-by <source> (<source state>)` — the producer leg, NAMED rather than
+		//     discovered an hour later.
+		// An edge may NOT point at another edge (depth <= 2). That rule is the whole
+		// difference from the contract this replaces: the old one was satisfiable at both
+		// ends while both ends were stale, which is precisely how it held on five stale
+		// distros.
+		//
+		// The FAILURE set is the STRUCTURAL one, and "structural" means exactly this: a pin the
+		// workflow cannot JUDGE, or two sides that DISAGREE — including a `blocked-by` that
+		// names NO leg (a source that is not a declared pin, or a twin its source declares no
+		// ref for), because there is then no producer to wait for. Everything judged and merely
+		// not-yet-advanced PASSES and is reported, so `behind`, `not-on-the-served-line` and a
+		// `blocked-by` that DOES name a leg are legs of a
+		// cross-repo sequence whose next step is another repo's PR, and a gate that failed
+		// on them would be permanently red — which trains every reader to ignore it, the
+		// mirror problem inverted. So the Message LEADS with the number of pins that are
+		// not current, and a green run can never read as "everything is fine".
+		type pin struct {
+			path, intent, recorded, served, which, state string
+		}
+		type classified struct {
+			pin
+			leaf bool
+		}
+		short := func(s string) string {
+			if len(s) > 10 {
+				return s[:10]
+			}
+			return s
+		}
+
+		// ancestryClass is the ONE definition of what a recorded commit's relation to the ref
+		// its intent names MEANS. TWO call sites judge it — a LEAF against its remote ref, and
+		// a `pin_map` edge's TWIN against the twin's remote ref — and they must not drift
+		// apart, which they did: the twin path was ONE-WAY and had no `unmerged` arm, so a
+		// squash advance on a nested twin was reported as a `diverged` state the contract does
+		// not name (validator round 2, non-blocking note). Same rule, one function, both
+		// shapes.
+		//
+		// gitArgs is the repository the ancestry is read IN — the submodule's own git dir for a
+		// leaf, the source checkout's for a twin. An ABSENT checkout is the CALLER's to name,
+		// because only the caller knows which one is missing.
+		ancestryClass := func(p, gitArgs, rec, served string) (state, fail string) {
+			recQ, servedQ := shellQuote(rec), shellQuote(served)
+			if _, _, exit := hostCapture(context.Background(), projDir,
+				fmt.Sprintf("git %s merge-base --is-ancestor %s %s", gitArgs, recQ, servedQ)); exit == 0 {
+				return "behind", ""
+			}
+			if _, _, exit := hostCapture(context.Background(), projDir,
+				fmt.Sprintf("git %s merge-base --is-ancestor %s %s", gitArgs, servedQ, recQ)); exit == 0 {
+				return "unmerged", fmt.Sprintf(
+					"%s: recorded %s is AHEAD of the served ref %s — the pin names a commit the repo does not serve",
+					p, short(rec), short(served))
+			}
+			return "not-on-the-served-line", ""
+		}
+		// squashWhy is the explanation BOTH paths attach to that class. It is not a defect and
+		// must not be a FAILURE: a SQUASH-MERGED branch advances without descending from its
+		// previous head, so a pin taken before the merge is unreachable from the served ref —
+		// MEASURED on the real umbrella (`charly`, whose own merge style is squash, and
+		// `layer-charly-internals`), where a first cut that called it a divergence went red on
+		// a healthy tree. A hand-pin to an unrelated commit yields the SAME two SHAs, so the
+		// objects cannot tell the two apart; the honest report is the class plus the one remedy
+		// that is right for both — advance the pin, which is what `task sync` does.
+		squashWhy := "a squash-merged branch advances without descending from its previous head, and a hand-pin looks identical; advance the pin either way"
+		var rows []classified
+		var structural []string
+		stateOf := map[string]string{}
+
+		// intentOf states IMPLICIT intents rather than leaving them unstated: `bump`
+		// rolls every path not in pin_map to its own default-branch HEAD, so that IS the
+		// intent of such a path — it was simply never written down. A path with neither an
+		// intent nor a `branch=` cannot be judged at all, and says so.
+		intentOf := func(p string) string {
+			if _, derived := in.PinMap[p]; derived {
+				return "derived-from:" + in.PinnedFrom
+			}
+			if s, ok := in.Intent[p]; ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+			if b := submoduleBranch(projDir, p); b != "" {
+				return "upstream:" + b + " (implicit: .gitmodules branch=)"
+			}
+			return ""
+		}
+		refOf := func(intent string) string {
+			ref := strings.TrimPrefix(intent, "upstream:")
+			if i := strings.Index(ref, " ("); i >= 0 {
+				ref = ref[:i]
+			}
+			return strings.TrimSpace(ref)
+		}
+
+		// THE GRAPH, classified once for EVERY path, then the depth rule walked over EVERY
+		// edge source. This replaces a check that read `pinned_from` and therefore guarded one
+		// of the two documented edge shapes: with `pin_map: {d: inner}` and
+		// `intent: {e: "derived-from:d"}`, `e`'s source `d` IS a `pin_map` entry (an edge) and
+		// went through unrefused. Same rule, same map, both shapes.
+		g := newPinGraph(paths, intentOf, in)
+		for _, e := range g.edgeSources(paths) {
+			if g.kindOf(e.source) != kindEdge {
+				continue
+			}
+			structural = append(structural, fmt.Sprintf(
+				"graph depth > 1: %s derives from %q, which is ITSELF an edge (%s); an edge may not point at an edge",
+				e.edge, e.source, g.shape[e.source]))
+		}
+
+		// Pass 1 — the LEAVES, and the pins that cannot be judged at all. Leaves first is
+		// also the producer-first order: an edge cannot be judged before its source.
+		for _, p := range paths {
+			rec := gitlink(projDir, p)
+			intent := intentOf(p)
+			r := classified{pin: pin{path: p, intent: intent, recorded: rec}, leaf: true}
+			switch {
+			case rec == "":
+				r.state = "no-gitlink"
+				structural = append(structural, fmt.Sprintf("%s: no gitlink recorded in the index", p))
+			case intent == "":
+				r.state = "unpinned"
+				structural = append(structural, fmt.Sprintf(
+					"%s: no intent and no `branch=` in .gitmodules — declare one (`upstream:<ref>`, or a branch)", p))
+			case strings.HasPrefix(intent, "derived-from:"):
+				r.leaf = false
+				r.state = "pending-edge"
+			default:
+				url := submoduleURL(projDir, p)
+				if url == "" {
+					r.state = "no-url"
+					structural = append(structural, fmt.Sprintf("%s: no url in .gitmodules", p))
+					break
+				}
+				served, which := resolveUpstreamRef(projDir, url, refOf(intent))
+				r.served, r.which = served, which
+				switch {
+				case served == "":
+					r.state = "ref-not-served"
+					structural = append(structural, fmt.Sprintf(
+						"%s: neither a branch nor a tag %q is served by %s (intent %s)", p, refOf(intent), url, intent))
+				case rec == served:
+					r.state = "cur"
+				default:
+					// Ancestry is the one read that needs objects locally. Its ABSENCE is
+					// reported, never folded into a verdict.
+					_, gitArgs, aerr := submoduleAt(projDir, p)
+					if aerr != nil {
+						r.state = "differs (no checkout to judge ancestry)"
+						break
+					}
+					state, fail := ancestryClass(p, gitArgs, rec, served)
+					r.state = state
+					if fail != "" {
+						structural = append(structural, fail)
+					}
+					if state == "not-on-the-served-line" {
+						r.which = squashWhy
+					}
+				}
+			}
+			stateOf[p] = r.state
+			rows = append(rows, r)
+		}
+
+		// Pass 2 — the EDGES, judged only against a source that pass 1 could judge. The two
+		// edge SHAPES a declared intent may take are judged differently, because their
+		// sources live in different places:
+		//   * a `pin_map` entry derives from ANOTHER CHECKOUT (`pinned_from`), so its value
+		//     is that checkout's recorded gitlink for the twin path, and its currency is the
+		//     state of the source's OWN pin at that twin — one hop further than its gitlink;
+		//   * an explicit `derived-from:<path>` derives from a SOURCE PIN OF THIS REPO, so
+		//     its value is that pin's recorded gitlink read HERE, and its currency is that
+		//     pin's own state. Judging it against `pinned_from` would answer a question the
+		//     caller did not ask.
+		for i := range rows {
+			if rows[i].leaf {
+				continue
+			}
+			p := rows[i].path
+			twin, viaPinMap := in.PinMap[p]
+			if !viaPinMap {
+				src := strings.TrimSpace(strings.TrimPrefix(rows[i].intent, "derived-from:"))
+				// An edge whose source is ITSELF an edge was refused by the depth rule above, and
+				// it has no state to derive, because there is nothing to inherit. Naming that is
+				// what keeps pass 1's internal `pending-edge` placeholder out of the report, and
+				// it keeps the refusal independent of the ORDER `paths` happens to be in.
+				if g.kindOf(src) == kindEdge {
+					rows[i].state = fmt.Sprintf("blocked-by %s (itself an edge)", src)
+					continue
+				}
+				want := gitlink(projDir, src)
+				rows[i].served = want
+				switch {
+				case src == "":
+					rows[i].state = "no-source-pin"
+					structural = append(structural, fmt.Sprintf(
+						"%s: an explicit derived-from intent names no source path", p))
+				case want == "":
+					rows[i].state = "no-source-pin"
+					structural = append(structural, fmt.Sprintf(
+						"%s: derived-from source %q records no gitlink in this repo's index", p, src))
+				case want != rows[i].recorded:
+					rows[i].state = "pin-mismatch"
+					structural = append(structural, fmt.Sprintf(
+						"pin-mismatch: %s records %s but its declared source %s records %s",
+						p, short(rows[i].recorded), src, short(want)))
+				default:
+					if srcState, judged := stateOf[src]; !judged {
+						rows[i].state = "blocked-by " + src + " (not a declared pin)"
+						structural = append(structural, fmt.Sprintf(
+							"%s: derived-from source %q is not one of this repo's declared pins, so it has no state to inherit", p, src))
+					} else if srcState == "cur" {
+						rows[i].state = "cur"
+					} else {
+						rows[i].state = "blocked-by " + src + " (" + srcState + ")"
+					}
+				}
+				continue
+			}
+			src := in.PinnedFrom
+			want := submoduleGitlink(projDir, src, twin)
+			rows[i].served = want
+			switch {
+			case want == "":
+				rows[i].state = "no-source-pin"
+				structural = append(structural, fmt.Sprintf(
+					"%s: no gitlink for %q in %q — the edge names a source that does not record it", p, twin, src))
+			case want != rows[i].recorded:
+				rows[i].state = "pin-mismatch"
+				structural = append(structural, fmt.Sprintf(
+					"pin-mismatch: %s records %s but its source %s:%s records %s",
+					p, short(rows[i].recorded), src, twin, short(want)))
+			default:
+				// The edge HOLDS — the recorded value IS the source's value. That is
+				// CONSISTENCY, and on its own it is exactly the mirror the old contract
+				// settled for. The currency question moves ONE HOP FURTHER: is the TARGET PIN
+				// (the source's own pin at the twin path) current? It is judged from the
+				// source repo's `.gitmodules` — that is where the target's ref is declared —
+				// and against the target's remote. The source being current says nothing
+				// about its nested pin, which is how five stale distros stayed invisible.
+				twinBranch := nestedGitmodulesGet(projDir, src, "submodule."+twin+".branch")
+				twinURL := nestedGitmodulesGet(projDir, src, "submodule."+twin+".url")
+				if twinBranch == "" || twinURL == "" {
+					rows[i].state = "blocked-by " + src + ":" + twin + " (no ref declared)"
+					rows[i].which = "the source declares no branch=/url= for " + twin + " — declare one there, or give this pin its own upstream intent"
+					structural = append(structural, fmt.Sprintf(
+						"%s: source %s declares no branch=/url= for %q, so the target pin cannot be judged", p, src, twin))
+					break
+				}
+				tServed, tWhich := resolveUpstreamRef(projDir, twinURL, twinBranch)
+				rows[i].served, rows[i].which = tServed, src+":"+twin+" "+tWhich
+				// A twin's unserved ref stays a LEG rather than a failure, and the asymmetry
+				// with the leaf arm is deliberate: the ref that is not served was declared by
+				// the PRODUCER (the source repo's own `.gitmodules`), so this pin reports a
+				// producer to fix — `blocked-by <src>:<twin> (ref-not-served)` — while a LEAF's
+				// unserved ref is THIS repo's own wrong intent, which is structural.
+				var twinState, tFail string
+				switch {
+				case tServed == "":
+					twinState = "ref-not-served"
+				case want == tServed:
+					twinState = "cur"
+				default:
+					// The target's objects live in ITS OWN checkout, one level below the
+					// source (a repo does not hold its submodules' objects). Its absence is
+					// reported, never folded into a verdict.
+					nested := filepath.Join(projDir, src)
+					_, nArgs, nErr := submoduleAt(nested, twin)
+					switch {
+					case nErr != nil:
+						twinState = "differs (no checkout of " + twin + " to judge ancestry)"
+					default:
+						// The SAME judgement the leaf path makes, so the two cannot drift.
+						twinState, tFail = ancestryClass(p, nArgs, want, tServed)
+						if tFail != "" {
+							structural = append(structural, tFail)
+						}
+						if twinState == "not-on-the-served-line" {
+							rows[i].which = squashWhy
+						}
+					}
+				}
+				if twinState == "cur" {
+					rows[i].state = "cur"
+				} else {
+					rows[i].state = "blocked-by " + src + ":" + twin + " (" + twinState + ")"
+				}
+			}
+			// NO `stateOf` write here (validator round 3). A pin's state is RECORDED in pass 1
+			// and READ by exactly one consumer — an explicit `derived-from:<path>` edge
+			// inheriting its source's state — and an edge whose source is itself an edge is
+			// REFUSED above, before that read. So nothing can inherit a state that only this
+			// branch could have written: the write was live until the depth guard landed, and the
+			// guard is what retired it. Recording it anyway is the write-only state R2 deletes.
+		}
+
+		// Render: the count of pins that are NOT current leads, because a green run must
+		// never be readable as "everything is fine".
+		byState := map[string]int{}
+		for _, r := range rows {
+			byState[r.state]++
+		}
+		states := make([]string, 0, len(byState))
+		for s := range byState {
+			states = append(states, s)
+		}
+		sort.Strings(states)
+		var tally []string
+		for _, s := range states {
+			tally = append(tally, fmt.Sprintf("%d %s", byState[s], s))
+		}
+		notCur := len(rows) - byState["cur"]
+
+		// Intent KINDS are counted so no intent stays silent even when every pin is current,
+		// and every pin that is NOT current is named with its intent, both SHAs and the
+		// namespace that answered — a state without its intent is not actionable.
+		leaves, implicit, derived := 0, 0, 0
+		for _, r := range rows {
+			switch {
+			case strings.HasPrefix(r.intent, "derived-from:"):
+				derived++
+			default:
+				leaves++
+				if strings.Contains(r.intent, "implicit:") {
+					implicit++
+				}
+			}
+		}
+		var detail []string
+		for _, r := range rows {
+			if r.state == "cur" {
+				continue
+			}
+			d := fmt.Sprintf("%s: %s; intent %s; recorded %s", r.path, r.state, r.intent, short(r.recorded))
+			if r.served != "" {
+				d += "; served " + short(r.served)
+			}
+			if r.which != "" {
+				d += " (" + r.which + ")"
+			}
+			detail = append(detail, d)
+		}
+
+		// Producer-first leg order: the leaves that can advance now, then the edges those
+		// leaves unblock.
+		var legs []string
+		for _, r := range rows {
+			if r.leaf && r.state == "behind" {
+				legs = append(legs, fmt.Sprintf("%s (%s -> %s)", r.path, short(r.recorded), short(r.served)))
+			}
+		}
+		for _, r := range rows {
+			if !r.leaf && strings.HasPrefix(r.state, "blocked-by") {
+				legs = append(legs, fmt.Sprintf("%s (%s)", r.path, r.state))
+			}
+		}
+		legText := "none — every pin is at the ref its intent names"
+		if notCur > 0 {
+			legText = strings.Join(legs, " -> ")
+			if legText == "" {
+				legText = "none reachable from this repo"
+			}
+		}
+		head := fmt.Sprintf("currency: %d of %d pin(s) NOT current [%s]; intents: %d upstream leaf/leaves (%d implicit), %d derived-from edge(s)",
+			notCur, len(rows), strings.Join(tally, ", "), leaves, implicit, derived)
+		if len(detail) > 0 {
+			head += "; NOT CURRENT: " + strings.Join(detail, "; ")
+		}
+		if len(structural) > 0 {
+			sort.Strings(structural)
+			return spec.StatusFail, fmt.Sprintf("%s; %d STRUCTURAL failure(s): %s; producer-first legs: %s",
+				head, len(structural), strings.Join(structural, "; "), legText)
+		}
+		return spec.StatusPass, fmt.Sprintf("%s; producer-first legs: %s", head, legText)
 
 	default:
 		return spec.StatusFail, fmt.Sprintf("git-submodules: unknown mode %q", in.Mode)
