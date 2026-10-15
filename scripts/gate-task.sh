@@ -302,6 +302,14 @@ currency-depth:
       - check: the graph is acyclic by construction
         git-submodules: {mode: currency, pinned_from: src, pin_map: {src: inner}}
         context: [runtime]
+currency-depth-explicit:
+  task:
+    description: an EXPLICIT edge over an edge must be refused too, not answered
+    dir: .
+    plan:
+      - check: the graph is acyclic by construction, for BOTH edge shapes
+        git-submodules: {mode: currency, intent: {src: "derived-from:target2", target2: "derived-from:src"}}
+        context: [runtime]
 YML
 
 cd "$FIX/umb"
@@ -408,6 +416,17 @@ if depth_out="$(cd "$FIX/umb2" && "$CH" task currency-depth 2>&1)"; then
   echo "FAIL: an edge over an edge must be refused" >&2; exit 1
 fi
 echo "$depth_out" | grep -q 'graph depth > 1' || { echo "FAIL: the refusal must name the depth; got: $depth_out" >&2; exit 1; }
+
+echo "== verb:git-submodules currency (an EXPLICIT edge over an edge must be REFUSED too) =="
+# The two shapes are ONE rule, so BOTH are driven live. The check used to read `pinned_from`
+# only, so with `pinned_from` empty the EXPLICIT `derived-from:<path>` shape was never
+# guarded — this arm FAILS on the pre-fix source (no `graph depth > 1` at all), which is the
+# coverage the round-2 verdict found missing.
+if exp_out="$(cd "$FIX/umb2" && "$CH" task currency-depth-explicit 2>&1)"; then
+  echo "FAIL: an explicit edge over an edge must be refused" >&2; exit 1
+fi
+echo "$exp_out" | grep -q 'graph depth > 1' || { echo "FAIL: the refusal must name the depth; got: $exp_out" >&2; exit 1; }
+echo "$exp_out" | grep -q 'which is ITSELF an edge' || { echo "FAIL: the refusal must name the source's shape; got: $exp_out" >&2; exit 1; }
 
 echo "== verb:file-parity (identical must PASS, drift must FAIL) =="
 par_out="$("$CH" task parity)"; echo "$par_out" | grep -q '0 failed' || { echo "FAIL: identical pair must pass" >&2; exit 1; }

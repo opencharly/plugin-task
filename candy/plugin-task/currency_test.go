@@ -309,3 +309,94 @@ func TestGitSubmodules_CurrencyNamesTheSquashAdvance(t *testing.T) {
 		}
 	}
 }
+
+// TestGitSubmodules_CurrencyRefusesDepthForBOTHEdgeShapes is the arm validator round 2 asked
+// for. The depth rule is about the GRAPH, so it must hold for EVERY edge source; round 1
+// read `pinned_from` only, which left the EXPLICIT `derived-from:<path>` shape unguarded
+// while `schema/task.cue` promised "An edge may NOT point at another edge (depth <= 2): the
+// graph is acyclic BY CONSTRUCTION".
+//
+// BOTH arms FAIL on the pre-change source (`42b76d4`), where the guard was
+// `if in.PinnedFrom != "" && len(in.PinMap) > 0` — it fired only when PINNED_FROM was itself
+// an edge, so in both arms below it either did not run at all or read a field that was never
+// an edge.
+func TestGitSubmodules_CurrencyRefusesDepthForBOTHEdgeShapes(t *testing.T) {
+	tmp := t.TempDir()
+	dir, run, c1, _, _ := curSuper(t, tmp)
+	// Three pins, so an edge can name EITHER shape of source: a `pin_map` ENTRY, and a path
+	// that DECLARES a `derived-from:` intent.
+	writeFile(t, filepath.Join(dir, ".gitmodules"),
+		"[submodule \"src\"]\n\tpath = src\n\turl = ../up\n\tbranch = main\n"+
+			"[submodule \"d\"]\n\tpath = d\n\turl = ../up\n\tbranch = main\n"+
+			"[submodule \"e\"]\n\tpath = e\n\turl = ../up\n\tbranch = main\n")
+	run("add", ".gitmodules")
+	for _, p := range []string{"src", "d", "e"} {
+		curRecord(t, dir, p, c1)
+	}
+	run("commit", "-qm", "three pins")
+
+	// Both SHAPES are driven as subtests, so ONE failing arm cannot hide the other's verdict.
+	for _, arm := range []struct {
+		name     string
+		in       map[string]any
+		shape    string // the source's shape, as the refusal must name it
+		refusal  string // the state the refused edge must report
+		sourceIn string // the path the refusal must name as the edge's source
+	}{
+		{
+			// SHAPE 1 — an EXPLICIT edge whose source is a `pin_map` ENTRY. This is the shape
+			// the verdict named: with `pin_map: {d: inner}` and `intent: {e: "derived-from:d"}`,
+			// `e`'s source `d` IS an edge — and `pinned_from` is empty, so the round-1 guard,
+			// which read `pinned_from`, never ran.
+			name: "explicit edge onto a `pin_map` entry",
+			in: map[string]any{
+				"mode":    "currency",
+				"pin_map": map[string]any{"d": "inner"},
+				"intent":  map[string]any{"e": "derived-from:d"},
+			},
+			shape:    "a `pin_map` entry (d -> inner)",
+			refusal:  "blocked-by d (itself an edge)",
+			sourceIn: `derives from "d"`,
+		},
+		{
+			// SHAPE 2 — an EXPLICIT edge whose source DECLARES a `derived-from:` intent.
+			// `pinned_from` and `pin_map` are BOTH empty, so there is no field the round-1
+			// guard read that could see it: the depth-3 chain `d -> e -> src` went through.
+			name: "explicit edge onto a declaring edge",
+			in: map[string]any{
+				"mode":   "currency",
+				"intent": map[string]any{"d": "derived-from:e", "e": "derived-from:src"},
+			},
+			shape:    `declares intent "derived-from:src"`,
+			refusal:  "blocked-by e (itself an edge)",
+			sourceIn: `derives from "e"`,
+		},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			st, msg := runMaintenanceVerbIn(dir, "git-submodules", arm.in)
+			if st != spec.StatusFail {
+				t.Fatalf("an edge over an edge must be refused; got %s: %s", st, msg)
+			}
+			for _, want := range []string{
+				"graph depth > 1",
+				"which is ITSELF an edge",
+				"an edge may not point at an edge",
+				arm.sourceIn,
+				arm.shape,
+			} {
+				if !strings.Contains(msg, want) {
+					t.Fatalf("the refusal must name the rule and the source's shape; missing %q in:\n%s", want, msg)
+				}
+			}
+			// The refused pin must SAY why, rather than reporting pass 1's internal
+			// placeholder: `pending-edge` is not a contract state, and leaving it in the report
+			// would make the refusal's own state depend on the ORDER `paths` is walked in.
+			if strings.Contains(msg, "pending-edge") {
+				t.Fatalf("a refused edge must not report an internal placeholder as its state:\n%s", msg)
+			}
+			if !strings.Contains(msg, arm.refusal) {
+				t.Fatalf("the refused edge must name its own refusal as its state; missing %q in:\n%s", arm.refusal, msg)
+			}
+		})
+	}
+}

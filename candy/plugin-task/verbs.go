@@ -316,6 +316,84 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 	return status, msg
 }
 
+// pinKind is what a pin's declared intent RESOLVES to. `pinGraph` classifies it for EVERY
+// path at once, because the depth rule has to be a property of the GRAPH rather than a check
+// at one call site — and a rule kept at a call site is a rule the next edge SHAPE walks
+// around. MEASURED (validator round 2, head 42b76d4): the check read `pinned_from` only, so
+// an explicit `derived-from:<path>` edge whose source was itself an edge was never refused,
+// while schema/task.cue promised a graph acyclic BY CONSTRUCTION.
+type pinKind int
+
+const (
+	// kindUnpinned is also the ZERO value, and that is the safe default: a path the graph has
+	// never seen cannot supply an edge to inherit either, so an unknown source can never be
+	// silently accepted as a leaf.
+	kindUnpinned pinKind = iota // no intent and no `branch=`: unjudgeable, and reported as such
+	kindLeaf                    // `upstream:<ref>`: judged against the REMOTE ref
+	kindEdge                    // `derived-from:<source>`: a `pin_map` entry, or an explicit intent
+)
+
+// pinGraph is every pin's KIND plus, for an EDGE and nothing else, the path it derives from.
+//
+// `source` is written only for kindEdge, so "the source of a leaf" is not expressible in this
+// type: a depth-3 chain is representable here ONLY as an edge whose source is itself a key of
+// `source` — which is exactly the shape the depth rule refuses. The rule therefore lives in
+// the DATA, and a third edge shape added later inherits it instead of having to remember it.
+type pinGraph struct {
+	kind   map[string]pinKind
+	source map[string]string
+	// shape says HOW each of those paths is an edge, so a refusal can name it.
+	shape map[string]string
+}
+
+// edgeRef is one edge and the path it derives from.
+type edgeRef struct{ edge, source string }
+
+// newPinGraph classifies EVERY path ONCE. `intentOf` is the caller's resolution of a path's
+// declared intent (including the implicit `upstream:<branch>` of a `branch=`-carrying
+// `.gitmodules` entry), so the graph and the walk cannot disagree about what a pin means.
+func newPinGraph(paths []string, intentOf func(string) string, in params.GitSubmodulesInput) pinGraph {
+	g := pinGraph{
+		kind:   map[string]pinKind{},
+		source: map[string]string{},
+		shape:  map[string]string{},
+	}
+	for _, p := range paths {
+		it := intentOf(p)
+		switch {
+		case it == "":
+			g.kind[p] = kindUnpinned
+		case strings.HasPrefix(it, "derived-from:"):
+			g.kind[p] = kindEdge
+			g.source[p] = strings.TrimSpace(strings.TrimPrefix(it, "derived-from:"))
+			if twin, viaPinMap := in.PinMap[p]; viaPinMap {
+				g.shape[p] = fmt.Sprintf("a `pin_map` entry (%s -> %s)", p, twin)
+			} else {
+				g.shape[p] = fmt.Sprintf("declares intent %q", it)
+			}
+		default:
+			g.kind[p] = kindLeaf
+		}
+	}
+	return g
+}
+
+// kindOf reports a path's kind. An unclassified path is kindUnpinned, never a leaf.
+func (g pinGraph) kindOf(p string) pinKind { return g.kind[p] }
+
+// edgeSources returns EVERY edge and its source, in the caller's path order. Walking THIS,
+// rather than reading one struct field, is the whole difference between checking the graph
+// and checking a field.
+func (g pinGraph) edgeSources(paths []string) []edgeRef {
+	var out []edgeRef
+	for _, p := range paths {
+		if g.kind[p] == kindEdge {
+			out = append(out, edgeRef{edge: p, source: g.source[p]})
+		}
+	}
+	return out
+}
+
 func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit []string) (spec.Status, string) {
 	paths, err := submodulePaths(projDir)
 	if err != nil {
@@ -558,10 +636,12 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 		// ends while both ends were stale, which is precisely how it held on five stale
 		// distros.
 		//
-		// The FAILURE set is the STRUCTURAL one — a pin the workflow cannot judge
-		// (`unpinned`), an edge whose two sides disagree (`pin-mismatch`), a pin off the
-		// served line (`diverged`/`unmerged`), an unserved ref, and a graph deeper than one
-		// derived hop. `behind` and `blocked-by` PASS and are REPORTED: they are legs of a
+		// The FAILURE set is the STRUCTURAL one, and "structural" means exactly this: a pin the
+		// workflow cannot JUDGE, or two sides that DISAGREE — including a `blocked-by` that
+		// names NO leg (a source that is not a declared pin, or a twin its source declares no
+		// ref for), because there is then no producer to wait for. Everything judged and merely
+		// not-yet-advanced PASSES and is reported, so `behind`, `not-on-the-served-line` and a
+		// `blocked-by` that DOES name a leg are legs of a
 		// cross-repo sequence whose next step is another repo's PR, and a gate that failed
 		// on them would be permanently red — which trains every reader to ignore it, the
 		// mirror problem inverted. So the Message LEADS with the number of pins that are
@@ -579,6 +659,41 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 			}
 			return s
 		}
+
+		// ancestryClass is the ONE definition of what a recorded commit's relation to the ref
+		// its intent names MEANS. TWO call sites judge it — a LEAF against its remote ref, and
+		// a `pin_map` edge's TWIN against the twin's remote ref — and they must not drift
+		// apart, which they did: the twin path was ONE-WAY and had no `unmerged` arm, so a
+		// squash advance on a nested twin was reported as a `diverged` state the contract does
+		// not name (validator round 2, non-blocking note). Same rule, one function, both
+		// shapes.
+		//
+		// gitArgs is the repository the ancestry is read IN — the submodule's own git dir for a
+		// leaf, the source checkout's for a twin. An ABSENT checkout is the CALLER's to name,
+		// because only the caller knows which one is missing.
+		ancestryClass := func(p, gitArgs, rec, served string) (state, fail string) {
+			recQ, servedQ := shellQuote(rec), shellQuote(served)
+			if _, _, exit := hostCapture(context.Background(), projDir,
+				fmt.Sprintf("git %s merge-base --is-ancestor %s %s", gitArgs, recQ, servedQ)); exit == 0 {
+				return "behind", ""
+			}
+			if _, _, exit := hostCapture(context.Background(), projDir,
+				fmt.Sprintf("git %s merge-base --is-ancestor %s %s", gitArgs, servedQ, recQ)); exit == 0 {
+				return "unmerged", fmt.Sprintf(
+					"%s: recorded %s is AHEAD of the served ref %s — the pin names a commit the repo does not serve",
+					p, short(rec), short(served))
+			}
+			return "not-on-the-served-line", ""
+		}
+		// squashWhy is the explanation BOTH paths attach to that class. It is not a defect and
+		// must not be a FAILURE: a SQUASH-MERGED branch advances without descending from its
+		// previous head, so a pin taken before the merge is unreachable from the served ref —
+		// MEASURED on the real umbrella (`charly`, whose own merge style is squash, and
+		// `layer-charly-internals`), where a first cut that called it a divergence went red on
+		// a healthy tree. A hand-pin to an unrelated commit yields the SAME two SHAs, so the
+		// objects cannot tell the two apart; the honest report is the class plus the one remedy
+		// that is right for both — advance the pin, which is what `task sync` does.
+		squashWhy := "a squash-merged branch advances without descending from its previous head, and a hand-pin looks identical; advance the pin either way"
 		var rows []classified
 		var structural []string
 		stateOf := map[string]string{}
@@ -607,17 +722,19 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 			return strings.TrimSpace(ref)
 		}
 
-		// The depth rule is checked BEFORE any state is derived from the graph.
-		if in.PinnedFrom != "" && len(in.PinMap) > 0 {
-			if twin, isEdge := in.PinMap[in.PinnedFrom]; isEdge {
-				structural = append(structural, fmt.Sprintf(
-					"graph depth > 1: derived-from source %q is itself a derived pin (%q -> %q); an edge may not point at an edge",
-					in.PinnedFrom, in.PinnedFrom, twin))
+		// THE GRAPH, classified once for EVERY path, then the depth rule walked over EVERY
+		// edge source. This replaces a check that read `pinned_from` and therefore guarded one
+		// of the two documented edge shapes: with `pin_map: {d: inner}` and
+		// `intent: {e: "derived-from:d"}`, `e`'s source `d` IS a `pin_map` entry (an edge) and
+		// went through unrefused. Same rule, same map, both shapes.
+		g := newPinGraph(paths, intentOf, in)
+		for _, e := range g.edgeSources(paths) {
+			if g.kindOf(e.source) != kindEdge {
+				continue
 			}
-			if s, ok := in.Intent[in.PinnedFrom]; ok && strings.HasPrefix(strings.TrimSpace(s), "derived-from:") {
-				structural = append(structural, fmt.Sprintf(
-					"graph depth > 1: derived-from source %q itself declares intent %q", in.PinnedFrom, strings.TrimSpace(s)))
-			}
+			structural = append(structural, fmt.Sprintf(
+				"graph depth > 1: %s derives from %q, which is ITSELF an edge (%s); an edge may not point at an edge",
+				e.edge, e.source, g.shape[e.source]))
 		}
 
 		// Pass 1 — the LEAVES, and the pins that cannot be judged at all. Leaves first is
@@ -661,29 +778,13 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 						r.state = "differs (no checkout to judge ancestry)"
 						break
 					}
-					rec2, served2 := shellQuote(rec), shellQuote(served)
-					if _, _, exit := hostCapture(context.Background(), projDir,
-						fmt.Sprintf("git %s merge-base --is-ancestor %s %s", gitArgs, rec2, served2)); exit == 0 {
-						r.state = "behind"
-					} else if _, _, exit := hostCapture(context.Background(), projDir,
-						fmt.Sprintf("git %s merge-base --is-ancestor %s %s", gitArgs, served2, rec2)); exit == 0 {
-						r.state = "unmerged"
-						structural = append(structural, fmt.Sprintf(
-							"%s: recorded %s is AHEAD of the served ref %s — the pin names a commit the repo does not serve",
-							p, short(rec), short(served)))
-					} else {
-						// Neither direction holds. This is NOT a defect and must not be a
-						// FAILURE: a SQUASH-MERGED branch advances without descending from its
-						// previous head, so a pin taken before the merge is unreachable from the
-						// served ref — MEASURED on the real umbrella, where exactly this read
-						// (`charly`, whose own merge style is squash, and `layer-charly-internals`)
-						// and a first cut that called it a divergence went red on a healthy tree.
-						// A hand-pin to an unrelated commit yields the SAME two SHAs, so the two
-						// cannot be told apart from the objects; the honest report is the class
-						// plus the one remedy that is right for both — advance the pin, which is
-						// what `task sync` does.
-						r.state = "not-on-the-served-line"
-						r.which = "a squash-merged branch advances without descending from its previous head, and a hand-pin looks identical; advance the pin either way"
+					state, fail := ancestryClass(p, gitArgs, rec, served)
+					r.state = state
+					if fail != "" {
+						structural = append(structural, fail)
+					}
+					if state == "not-on-the-served-line" {
+						r.which = squashWhy
 					}
 				}
 			}
@@ -709,6 +810,14 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 			twin, viaPinMap := in.PinMap[p]
 			if !viaPinMap {
 				src := strings.TrimSpace(strings.TrimPrefix(rows[i].intent, "derived-from:"))
+				// An edge whose source is ITSELF an edge was refused by the depth rule above, and
+				// it has no state to derive, because there is nothing to inherit. Naming that is
+				// what keeps pass 1's internal `pending-edge` placeholder out of the report, and
+				// it keeps the refusal independent of the ORDER `paths` happens to be in.
+				if g.kindOf(src) == kindEdge {
+					rows[i].state = fmt.Sprintf("blocked-by %s (itself an edge)", src)
+					continue
+				}
 				want := gitlink(projDir, src)
 				rows[i].served = want
 				switch {
@@ -770,7 +879,12 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 				}
 				tServed, tWhich := resolveUpstreamRef(projDir, twinURL, twinBranch)
 				rows[i].served, rows[i].which = tServed, src+":"+twin+" "+tWhich
-				var twinState string
+				// A twin's unserved ref stays a LEG rather than a failure, and the asymmetry
+				// with the leaf arm is deliberate: the ref that is not served was declared by
+				// the PRODUCER (the source repo's own `.gitmodules`), so this pin reports a
+				// producer to fix — `blocked-by <src>:<twin> (ref-not-served)` — while a LEAF's
+				// unserved ref is THIS repo's own wrong intent, which is structural.
+				var twinState, tFail string
 				switch {
 				case tServed == "":
 					twinState = "ref-not-served"
@@ -786,12 +900,13 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 					case nErr != nil:
 						twinState = "differs (no checkout of " + twin + " to judge ancestry)"
 					default:
-						a1, a2 := shellQuote(want), shellQuote(tServed)
-						if _, _, exit := hostCapture(context.Background(), projDir,
-							fmt.Sprintf("git %s merge-base --is-ancestor %s %s", nArgs, a1, a2)); exit == 0 {
-							twinState = "behind"
-						} else {
-							twinState = "diverged"
+						// The SAME judgement the leaf path makes, so the two cannot drift.
+						twinState, tFail = ancestryClass(p, nArgs, want, tServed)
+						if tFail != "" {
+							structural = append(structural, tFail)
+						}
+						if twinState == "not-on-the-served-line" {
+							rows[i].which = squashWhy
 						}
 					}
 				}
