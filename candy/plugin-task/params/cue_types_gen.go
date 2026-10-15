@@ -94,6 +94,22 @@ type SpliceRegionInput struct {
 	End string `yaml:"end,omitempty" json:"end"`
 }
 
+// #PinClosureInput resolves the TRANSITIVE CLOSURE of a pin advance: compile the
+// composed set, collect EVERY failing module, classify each BUMP (its newest
+// published version already carries the fix) or EDIT (it does not), and iterate to
+// a fixed point. Domain-neutral: the caller names the anchor module, any modules it
+// has already composed, and the pin prefix whose versions matter.
+type PinClosureInput struct {
+	// anchor is the module dir whose go.mod names the pins (default: <project>/charly).
+	Anchor string `yaml:"anchor,omitempty" json:"anchor,omitempty"`
+
+	// compose lists module dirs already adopted into the probe (they win over the pins).
+	Compose []string `yaml:"compose,omitempty" json:"compose,omitempty"`
+
+	// module_prefix limits the reported pins to one org (empty = every require line).
+	ModulePrefix string `yaml:"module_prefix,omitempty" json:"module_prefix,omitempty"`
+}
+
 // #ModulePinsInput adopts a set of module pins from a source go.mod into every
 // module a glob matches, then tidies.
 type ModulePinsInput struct {

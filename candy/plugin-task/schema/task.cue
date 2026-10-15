@@ -96,6 +96,20 @@
 	end:   string
 }
 
+// #PinClosureInput resolves the TRANSITIVE CLOSURE of a pin advance: compile the
+// composed set, collect EVERY failing module, classify each BUMP (its newest
+// published version already carries the fix) or EDIT (it does not), and iterate to
+// a fixed point. Domain-neutral: the caller names the anchor module, any modules it
+// has already composed, and the pin prefix whose versions matter.
+#PinClosureInput: {
+	// anchor is the module dir whose go.mod names the pins (default: <project>/charly).
+	anchor?: string
+	// compose lists module dirs already adopted into the probe (they win over the pins).
+	compose?: [...string] @go(Compose)
+	// module_prefix limits the reported pins to one org (empty = every require line).
+	module_prefix?: string @go(ModulePrefix)
+}
+
 // #ModulePinsInput adopts a set of module pins from a source go.mod into every
 // module a glob matches, then tidies.
 #ModulePinsInput: {

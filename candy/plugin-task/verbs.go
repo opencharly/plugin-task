@@ -85,6 +85,12 @@ func runMaintenanceVerbIn(projDir, word string, input map[string]any) (spec.Stat
 			return spec.StatusFail, derr.Error()
 		}
 		return runModulePins(projDir, in)
+	case "pin-closure":
+		var in params.PinClosureInput
+		if derr := decodeInput(input, &in); derr != nil {
+			return spec.StatusFail, derr.Error()
+		}
+		return runPinClosure(projDir, in)
 	case "prune":
 		var in params.PruneInput
 		if derr := decodeInput(input, &in); derr != nil {
