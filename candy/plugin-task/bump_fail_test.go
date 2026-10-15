@@ -51,7 +51,7 @@ func TestGitSubmodules_BumpSummaryLeadsWithFailures(t *testing.T) {
 	}
 	// And the reason is present, not merely a count.
 	// The cause must be present, whichever branch recorded it: an unresolvable gitlink ("no gitlink") or a
-	// pinned_from that did not roll (the policy-B refusal). Both are real causes; the assertion is that the
+	// pinned_from that did not roll (the EDGE refusal). Both are real causes; the assertion is that the
 	// message carries ONE of them rather than only a count.
 	if !strings.Contains(msg, "refused to pin") && !strings.Contains(msg, "no gitlink") {
 		t.Fatalf("the failure report leads but names no cause: %q", msg)

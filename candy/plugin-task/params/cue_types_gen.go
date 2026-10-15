@@ -7,76 +7,94 @@ package params
 // invoke another declared task.
 type TaskInput struct {
 	// task is the declared task entity name to run.
-	Task string `json:"task"`
+	Task string `yaml:"task,omitempty" json:"task"`
 
 	// params are NAME=VALUE overrides for the task's declared params.
-	Param []string `json:"param,omitempty"`
+	Param []string `yaml:"param,omitempty" json:"param,omitempty"`
 }
 
 // #GitSubmodulesInput drives `.gitmodules` pin maintenance.
 type GitSubmodulesInput struct {
-	// mode: status lists; bump stages new gitlinks; verify asserts.
-	Mode string `json:"mode"`
+	// mode: status lists; bump stages new gitlinks; verify asserts CONSISTENCY —
+	// that every checkout matches the gitlink the index records. currency asks the
+	// OTHER question, which needs no checkout at all: whether each recorded pin is
+	// the value its owning repo actually serves (a green verify is not a currency
+	// claim; it passes on a tree whose submodules are all behind their remotes).
+	Mode string `yaml:"mode,omitempty" json:"mode"`
 
 	// pinned_from is a checkout path whose gitlinks are authoritative for the
 	// entries named in pin_map (e.g. "charly"). Empty => no pinned set.
-	PinnedFrom string `json:"pinned_from,omitempty"`
+	PinnedFrom string `yaml:"pinned_from,omitempty" json:"pinned_from,omitempty"`
 
 	// pin_map maps a submodule PATH in this repo to its twin PATH in pinned_from.
 	// On bump, every submodule NOT in pin_map rolls to its own default-branch HEAD.
-	PinMap map[string]string `json:"pin_map,omitempty"`
+	PinMap map[string]string `yaml:"pin_map,omitempty" json:"pin_map,omitempty"`
+
+	// intent declares WHY each pin holds the value it does, so CURRENCY is
+	// answerable rather than assumed. Two shapes, and they are not interchangeable:
+	//
+	//	"upstream:<ref>"       a LEAF — the value is the owning repo's OWN ref, read
+	//	                       from the remote; no local state enters the answer.
+	//	"derived-from:<path>"  an EDGE — the value is <path>'s recorded gitlink.
+	//
+	// An entry in pin_map IS an edge (derived-from:pinned_from) and needs no intent
+	// entry. An edge may NOT point at another edge (depth <= 2): the graph is
+	// acyclic BY CONSTRUCTION, not by a validation that can be skipped. A path whose
+	// intent is absent AND which carries no `branch=` in .gitmodules is "unpinned" —
+	// reported as such, never silently treated as a leaf.
+	Intent map[string]string `yaml:"intent,omitempty" json:"intent,omitempty"`
 
 	// skip lists submodule paths the verb must not touch.
-	Skip []string `json:"skip,omitempty"`
+	Skip []string `yaml:"skip,omitempty" json:"skip,omitempty"`
 }
 
 // #FileParityInput asserts (or syncs) that paired files are byte-identical.
 type FileParityInput struct {
 	// mode: check fails on any drift; sync copies left -> right.
-	Mode string `json:"mode,omitempty"`
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
 
 	// pairs are the compared file pairs, left = source of truth.
-	Pairs []FileParityPair `json:"pairs"`
+	Pairs []FileParityPair `yaml:"pairs,omitempty" json:"pairs"`
 }
 
 type FileParityPair struct {
-	Left string `json:"left"`
+	Left string `yaml:"left,omitempty" json:"left"`
 
-	Right string `json:"right"`
+	Right string `yaml:"right,omitempty" json:"right"`
 }
 
 // #SpliceRegionInput splices a marked region from a fragment into a target file.
 type SpliceRegionInput struct {
 	// mode: sync writes; check exits non-zero on a stale target.
-	Mode string `json:"mode,omitempty"`
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
 
 	// target is the file whose marked region is replaced.
-	Target string `json:"target"`
+	Target string `yaml:"target,omitempty" json:"target"`
 
 	// fragment is the file carrying the source region (must carry the markers).
-	Fragment string `json:"fragment"`
+	Fragment string `yaml:"fragment,omitempty" json:"fragment"`
 
 	// begin / end are the region marker strings (a line containing begin starts the
 	// region; a line containing end closes it), matched with the fragment's own copy.
-	Begin string `json:"begin"`
+	Begin string `yaml:"begin,omitempty" json:"begin"`
 
-	End string `json:"end"`
+	End string `yaml:"end,omitempty" json:"end"`
 }
 
 // #ModulePinsInput adopts a set of module pins from a source go.mod into every
 // module a glob matches, then tidies.
 type ModulePinsInput struct {
 	// mode: sync edits+tidies; check only asserts.
-	Mode string `json:"mode,omitempty"`
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
 
 	// source_go_mod is the go.mod whose require pins are the source of truth.
-	SourceGoMod string `json:"source_go_mod"`
+	SourceGoMod string `yaml:"source_go_mod,omitempty" json:"source_go_mod"`
 
 	// glob is the directory glob (relative to the working dir) selecting modules.
-	Glob string `json:"glob"`
+	Glob string `yaml:"glob,omitempty" json:"glob"`
 
 	// keys are the module paths whose pins are adopted (e.g. sdk, spec).
-	Keys []string `json:"keys"`
+	Keys []string `yaml:"keys,omitempty" json:"keys"`
 }
 
 // #PruneInput garbage-collects merged-upstream session worktrees + branches: the
@@ -90,17 +108,17 @@ type ModulePinsInput struct {
 // target come from the authored input, never baked in (R3 / boundary law).
 type PruneInput struct {
 	// mode: report lists what would be pruned (a dry run); prune performs it.
-	Mode string `json:"mode,omitempty"`
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
 
 	// base is the merge target a branch must be merged into (default origin/main).
-	Base string `json:"base,omitempty"`
+	Base string `yaml:"base,omitempty" json:"base,omitempty"`
 
 	// include_closed also prunes worktrees/branches whose PR is CLOSED (abandoned).
 	// Off by default: a closed branch may hold unmerged work.
-	IncludeClosed bool `json:"include_closed,omitempty"`
+	IncludeClosed bool `yaml:"include_closed,omitempty" json:"include_closed,omitempty"`
 
 	// local_only skips the GitHub PR-state lookup. It then CANNOT see a
 	// squash-merged branch whose remote ref still survives (git ancestry alone
 	// misses it), so it prunes strictly less — never more.
-	LocalOnly bool `json:"local_only,omitempty"`
+	LocalOnly bool `yaml:"local_only,omitempty" json:"local_only,omitempty"`
 }

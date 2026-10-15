@@ -170,7 +170,7 @@ done
 # --- bump-order fixture: `src` is ITSELF a rolling submodule of `umb2`, stale, and
 # its `inner` gitlink advances during the bump. `target2` must be pinned from src's
 # NEW gitlink. A wrong order would pin target2 from src's OLD gitlink and then
-# advance src, violating policy B.
+# advance src, violating the edge.
 (
   cd "$FIX" && git init -q -b main leaf && cd leaf
   echo L1 > l && git add -A && G commit -qm L1; L1="$(git rev-parse HEAD)"
@@ -178,7 +178,7 @@ done
   printf 'L1=%s\nL2=%s\n' "$L1" "$L2" > "$FIX/leafshas"
   cd "$FIX" && git init -q -b main srcorigin && cd srcorigin
   echo seed > s && git add -A && G commit -qm seed
-  printf '[submodule "inner"]\n\tpath = inner\n\turl = %s\n' "$FIX/leaf" > .gitmodules
+  printf '[submodule "inner"]\n\tpath = inner\n\turl = %s\n\tbranch = main\n' "$FIX/leaf" > .gitmodules
   git add .gitmodules && G commit -qm gm
   . "$FIX/leafshas"
   git update-index --add --cacheinfo "160000,$L1,inner" && G commit -qm "inner=L1"; A="$(git rev-parse HEAD)"
@@ -203,7 +203,7 @@ git -c protocol.file.allow=always submodule update --init -q src target2
 cat > "$FIX/umb/charly.yml" <<'YML'
 pins-verify:
   task:
-    description: verify policy B
+    description: verify the edge holds
     dir: .
     plan:
       - check: the pin holds
@@ -286,6 +286,22 @@ order-bump:
       - run: bump
         git-submodules: {mode: bump, pinned_from: src, pin_map: {target2: inner}}
         context: [deploy]
+currency:
+  task:
+    description: ask whether every pin is at the ref its intent names (needs no checkout)
+    dir: .
+    plan:
+      - check: every pin is current
+        git-submodules: {mode: currency, pinned_from: src, pin_map: {target2: inner}}
+        context: [runtime]
+currency-depth:
+  task:
+    description: an EDGE over an EDGE must be refused, not answered
+    dir: .
+    plan:
+      - check: the graph is acyclic by construction
+        git-submodules: {mode: currency, pinned_from: src, pin_map: {src: inner}}
+        context: [runtime]
 YML
 
 cd "$FIX/umb"
@@ -377,6 +393,21 @@ src_got="$(git -C "$FIX/umb2" ls-files -s src | awk '{print $2}')"
 tgt_got="$(git -C "$FIX/umb2" ls-files -s target2 | awk '{print $2}')"
 [ "$src_got" = "$B" ] || { echo "FAIL: src did not roll to $B (got $src_got)" >&2; exit 1; }
 [ "$tgt_got" = "$L2" ] || { echo "FAIL: target2 pinned to $tgt_got, want L2=$L2 (L1=$L1 means stale src read)" >&2; exit 1; }
+
+echo "== verb:git-submodules currency (after the ordered bump every pin must be CURRENT) =="
+# The walk reads the recorded gitlinks and the REMOTE only, so a green run here is a claim
+# about what the upstreams serve — not about the local checkouts. opencharly/charly#936.
+cur_out="$(cd "$FIX/umb2" && "$CH" task currency 2>&1)"
+echo "$cur_out" | grep -q 'currency: 0 of ' || { echo "FAIL: currency must report zero pins off their ref; got: $cur_out" >&2; exit 1; }
+echo "$cur_out" | grep -q 'producer-first legs: none' || { echo "FAIL: no leg must remain after the ordered bump; got: $cur_out" >&2; exit 1; }
+
+echo "== verb:git-submodules currency (an edge over an edge must be REFUSED, never answered) =="
+# The depth rule is the whole difference from the contract this replaces: that one was
+# satisfiable at BOTH ends while both ends were stale. A refusal is the only honest answer.
+if depth_out="$(cd "$FIX/umb2" && "$CH" task currency-depth 2>&1)"; then
+  echo "FAIL: an edge over an edge must be refused" >&2; exit 1
+fi
+echo "$depth_out" | grep -q 'graph depth > 1' || { echo "FAIL: the refusal must name the depth; got: $depth_out" >&2; exit 1; }
 
 echo "== verb:file-parity (identical must PASS, drift must FAIL) =="
 par_out="$("$CH" task parity)"; echo "$par_out" | grep -q '0 failed' || { echo "FAIL: identical pair must pass" >&2; exit 1; }

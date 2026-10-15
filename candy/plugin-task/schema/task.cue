@@ -28,14 +28,31 @@
 
 // #GitSubmodulesInput drives `.gitmodules` pin maintenance.
 #GitSubmodulesInput: {
-	// mode: status lists; bump stages new gitlinks; verify asserts.
-	mode: "status" | "bump" | "verify"
+	// mode: status lists; bump stages new gitlinks; verify asserts CONSISTENCY —
+	// that every checkout matches the gitlink the index records. currency asks the
+	// OTHER question, which needs no checkout at all: whether each recorded pin is
+	// the value its owning repo actually serves (a green verify is not a currency
+	// claim; it passes on a tree whose submodules are all behind their remotes).
+	mode: "status" | "bump" | "verify" | "currency"
 	// pinned_from is a checkout path whose gitlinks are authoritative for the
 	// entries named in pin_map (e.g. "charly"). Empty => no pinned set.
 	pinned_from?: string @go(PinnedFrom)
 	// pin_map maps a submodule PATH in this repo to its twin PATH in pinned_from.
 	// On bump, every submodule NOT in pin_map rolls to its own default-branch HEAD.
 	pin_map?: {[string]: string} @go(PinMap)
+	// intent declares WHY each pin holds the value it does, so CURRENCY is
+	// answerable rather than assumed. Two shapes, and they are not interchangeable:
+	//
+	//	"upstream:<ref>"       a LEAF — the value is the owning repo's OWN ref, read
+	//	                       from the remote; no local state enters the answer.
+	//	"derived-from:<path>"  an EDGE — the value is <path>'s recorded gitlink.
+	//
+	// An entry in pin_map IS an edge (derived-from:pinned_from) and needs no intent
+	// entry. An edge may NOT point at another edge (depth <= 2): the graph is
+	// acyclic BY CONSTRUCTION, not by a validation that can be skipped. A path whose
+	// intent is absent AND which carries no `branch=` in .gitmodules is "unpinned" —
+	// reported as such, never silently treated as a leaf.
+	intent?: {[string]: string} @go(Intent)
 	// skip lists submodule paths the verb must not touch.
 	skip?: [...string]
 }

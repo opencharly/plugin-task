@@ -13,7 +13,7 @@ compiled into charly.
 | `kind:task` | a `task:` node in `charly.yml` | a named, reusable plan using the same `#Step`/`#Op` grammar a candy's `plan:` uses |
 | `command:task` | `charly task [list] [<name>] …` | run a task (and its `depends_on` closure) on the host |
 | `verb:task` | `task:` verb step in a plan | compose a declared task into a candy/box/task plan |
-| `verb:git-submodules` | `git-submodules:` verb step | status / bump / verify `.gitmodules` pins (incl. the policy-B comparison of a repo's pins against a pinned checkout's gitlinks) |
+| `verb:git-submodules` | `git-submodules:` verb step | status / bump / verify / currency over `.gitmodules` pins. `verify` asserts CONSISTENCY (each checkout matches the recorded gitlink); `currency` asserts CURRENCY (each pin is the ref its INTENT names), which no other mode answers |
 | `verb:file-parity` | `file-parity:` verb step | check / sync that paired files are byte-identical |
 | `verb:splice-region` | `splice-region:` verb step | splice a marked region from a fragment into a target |
 | `verb:module-pins` | `module-pins:` verb step | adopt a source go.mod's require pins across every module a glob matches, then tidy |
@@ -28,11 +28,12 @@ distro list is baked in. They are host-native: like the task engine they act on 
 repository checkout the charly process runs in.
 
 ```yaml
-# Bump every submodule pin per policy B (distro-* pins == charly's gitlinks;
-# everything else rolls to its own default-branch HEAD).
+# Bump every submodule pin to the ref its INTENT names: everything not listed in
+# pin_map rolls to its own default-branch HEAD (a LEAF), and every pin_map entry is
+# then derived from its pinned_from twin (an EDGE).
 sync:
   task:
-    description: Bump all submodule pins per policy B
+    description: Bump all submodule pins to the ref each pin's intent names
     plan:
       - run: bump the pins
         git-submodules:
@@ -42,6 +43,29 @@ sync:
             box/arch: box/arch
             box/fedora: box/fedora
         context: [deploy]
+
+# Ask the OTHER question — the one `verify` does not answer: is every recorded pin
+# the ref its owning repo actually SERVES? It reads the recorded gitlinks and the
+# REMOTES only, so it needs no checkout and cannot inherit an index-vs-checkout seam.
+#
+# `intent` says where each pin's value is supposed to come from:
+#   "upstream:<ref>"       a LEAF, judged against the remote ref
+#   (a pin_map entry)      an EDGE, judged by whether the SOURCE's own pin at the twin
+#                          path is current — one hop further than its gitlink
+# An edge over an edge is REFUSED (the graph is acyclic by construction); a source that
+# declares no ref for the twin is a failure naming what to declare. A pin that is merely
+# behind is reported as a LEG, with the producer-first order to work through.
+currency:
+  task:
+    description: Report every pin that is not at the ref its intent names
+    plan:
+      - check: every pin is current
+        git-submodules:
+          mode: currency
+          pinned_from: charly
+          pin_map:
+            box/arch: box/arch
+        context: [runtime]
 
 # Assert the harness config files are identical to charly's twins.
 harness:
