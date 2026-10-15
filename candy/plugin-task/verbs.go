@@ -994,7 +994,12 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 					rows[i].state = "blocked-by " + src + ":" + twin + " (" + twinState + ")"
 				}
 			}
-			stateOf[p] = rows[i].state
+			// NO `stateOf` write here (validator round 3). A pin's state is RECORDED in pass 1
+			// and READ by exactly one consumer — an explicit `derived-from:<path>` edge
+			// inheriting its source's state — and an edge whose source is itself an edge is
+			// REFUSED above, before that read. So nothing can inherit a state that only this
+			// branch could have written: the write was live until the depth guard landed, and the
+			// guard is what retired it. Recording it anyway is the write-only state R2 deletes.
 		}
 
 		// Render: the count of pins that are NOT current leads, because a green run must
