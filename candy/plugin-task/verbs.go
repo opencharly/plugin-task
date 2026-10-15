@@ -161,6 +161,69 @@ func gitlink(projDir, path string) string {
 	return strings.TrimSpace(out)
 }
 
+// gitlinkMismatchClass names WHY a submodule's checkout does not match the gitlink the
+// INDEX records, and the command that repairs it. It returns (class, remedy).
+//
+// The DIRECTION is the whole point (opencharly/opencharly#461). `verify` reads the recorded
+// pin from the SUPERPROJECT's index (gitlink → `git ls-files -s`) and compares it against the
+// submodule checkout's HEAD, and those two values are maintained by DIFFERENT verbs:
+// `charly task sync` (git-submodules bump) MATERIALISES each advance and STAGES it
+// (`git add <path>`), while the sanctioned branch workflow — `git switch -c <b> origin/main`,
+// `git reset`, `git stash pop`, an aborted commit — rewrites the index and silently UN-stages
+// those advances. The tree then holds a correctly-advanced set of pins whose index is behind
+// them, and before this classifier it was reported as `HEAD <h> != gitlink <g>`,
+// character-identical to a checkout that had drifted off its pin: the gate was right to be
+// red, but it named the wrong thing and never named the remedy (`git add`).
+//
+// The two states ARE the same object-level state, so no classifier can separate them by
+// CAUSE, and inventing one would be the guess this file avoids elsewhere. The honest report
+// is therefore the DIRECTION plus both remedies, ordered so the cause this repo actually
+// produces comes first. Only the ancestry question is answerable from the objects, and
+// `merge-base --is-ancestor` answers it locally with no network read — it exits 1 for "not an
+// ancestor" and 128 when the object is unknown here, and the latter is reported as such
+// rather than folded into either answer.
+func gitlinkMismatchClass(projDir, gitArgs, path, rec, head string) (class, remedy string) {
+	isAncestor := func(a, b string) (ahead, known bool) {
+		_, _, exit := hostCapture(context.Background(), projDir,
+			fmt.Sprintf("git %s merge-base --is-ancestor %s %s", gitArgs, shellQuote(a), shellQuote(b)))
+		return exit == 0, exit == 0 || exit == 1
+	}
+	if ahead, known := isAncestor(rec, head); known && ahead {
+		return "unstaged advance", fmt.Sprintf(
+			"the checkout is AHEAD of the pin the index records — `git add %s` records the advance `charly task sync` materialised, or `git submodule update %s` discards it",
+			path, path)
+	}
+	if behind, known := isAncestor(head, rec); known && behind {
+		return "checkout behind the index", fmt.Sprintf(
+			"the index records a pin this checkout does not have — `git submodule update %s`", path)
+	}
+	if _, known := isAncestor(rec, head); !known {
+		return "unverifiable here", fmt.Sprintf(
+			"the recorded pin is absent from this checkout, so the direction cannot be judged — `git submodule update %s`", path)
+	}
+	return "off its recorded gitlink", fmt.Sprintf(
+		"the checkout and the recorded pin are unrelated — `git -C %s fetch origin && git submodule update %s`", path, path)
+}
+
+// classTally renders the per-class counts of a failing run as ` (20 unstaged advance, 1 dirty
+// working tree)`, so a long failure list is legible as a distribution rather than only as N
+// rows. Sorted for a stable message; empty (never "()") when there is no class to count.
+func classTally(counts map[string]int) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	classes := make([]string, 0, len(counts))
+	for c := range counts {
+		classes = append(classes, c)
+	}
+	sort.Strings(classes)
+	parts := make([]string, 0, len(classes))
+	for _, c := range classes {
+		parts = append(parts, fmt.Sprintf("%d %s", counts[c], c))
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
+}
+
 // submoduleGitlink reads `subpath`'s recorded gitlink (SHA) from the tree at HEAD
 // of the INITIALIZED submodule at `path`, through submoduleAt's walk-up-safe form
 // (charly#768). Empty on any failure (missing/uninitialized submodule, absent
@@ -187,7 +250,12 @@ func submoduleGitlink(projDir, path, subpath string) string {
 //	verify — assert every pin_map entry equals pinned_from's twin (policy B), then
 //	         audit every `.gitmodules` path's CHECKOUT: an initialized submodule
 //	         must be clean and its HEAD must equal its recorded gitlink, read
-//	         through submoduleAt's walk-up-safe form (charly#768). The recorded
+//	         through submoduleAt's walk-up-safe form (charly#768). A mismatch is
+//	         reported with its DIRECTION and the command that repairs it
+//	         (gitlinkMismatchClass), because the recorded gitlink lives in this
+//	         repo's INDEX while the checkout belongs to another repo and a
+//	         `charly task sync` advance that was un-staged is not a broken pin
+//	         (opencharly/opencharly#461). The recorded
 //	         GITLINK is read for EVERY declared path, before the checkout is
 //	         classified (an index read needs no checkout), so a path declared with
 //	         no gitlink FAILS. An UNINITIALIZED path (declared, a gitlink, no
@@ -404,6 +472,12 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 		// Half 2 — the checkout audit the doc comment promises, over EVERY
 		// `.gitmodules` path: the recorded gitlink must be present in the index, and
 		// where a checkout exists it must be CLEAN and its HEAD must BE that gitlink.
+		// A mismatch FAILS (a commit that records the old pin is wrong) but is
+		// classified by DIRECTION with its remedy (gitlinkMismatchClass), because
+		// "checkout ahead of the index" and "checkout behind the index" are different
+		// defects with opposite repairs, and reporting both as `HEAD != gitlink`
+		// turned `charly task sync`'s own un-staged advance into a phantom break
+		// (opencharly/opencharly#461).
 		// Reads go through submoduleAt's walk-up-safe `--git-dir`/`--work-tree` form
 		// (charly#768), so a present-but-uninitialized directory can never resolve to
 		// the enclosing superproject's HEAD.
@@ -419,6 +493,7 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 		// coverage instead.
 		var uninitialized []string
 		checked := 0
+		classCounts := map[string]int{}
 		for _, p := range paths {
 			rec := gitlink(projDir, p)
 			if rec == "" {
@@ -438,15 +513,18 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 			head, _, _ := hostCapture(context.Background(), projDir,
 				fmt.Sprintf("git %s rev-parse HEAD", gitArgs))
 			if h := strings.TrimSpace(head); h != rec {
-				failures = append(failures, fmt.Sprintf("%s: HEAD %s != gitlink %s", p, h, rec))
+				class, remedy := gitlinkMismatchClass(projDir, gitArgs, p, rec, h)
+				classCounts[class]++
+				failures = append(failures, fmt.Sprintf("%s: %s (HEAD %s, index gitlink %s) — %s",
+					p, class, h, rec, remedy))
 				continue
 			}
 			checked++
 		}
 		if len(failures) > 0 {
 			sort.Strings(failures)
-			return spec.StatusFail, fmt.Sprintf("verify: %d failure(s): %s",
-				len(failures), strings.Join(failures, "; "))
+			return spec.StatusFail, fmt.Sprintf("verify: %d failure(s)%s: %s",
+				len(failures), classTally(classCounts), strings.Join(failures, "; "))
 		}
 		msg := fmt.Sprintf("verify: %d policy pin(s) hold across %d submodule(s); %d checkout(s) clean at their gitlink",
 			len(in.PinMap), len(paths), checked)
