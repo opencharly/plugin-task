@@ -205,16 +205,24 @@ func TestGitSubmodules_VerifyCheckoutAudit(t *testing.T) {
 		t.Fatalf("the failure must name the dirty path, got: %q", msg)
 	}
 
-	// FAIL: a checkout whose HEAD drifted off its gitlink must fail, naming both.
+	// FAIL: a checkout AHEAD of its recorded gitlink (a commit was added inside the checkout)
+	// must fail, and its DIRECTION must be named with the remedy. An advance made in the
+	// checkout is object-identically the un-staged-advance state `charly task sync` leaves after
+	// its staging is rewritten, so the two answers to give are "record it" and "discard it" —
+	// and neither is derivable from a bare `HEAD <h> != gitlink <g>`, which a broken pin
+	// produces verbatim (opencharly/opencharly#461).
 	subRun("checkout", "--", "README")
-	subRun("commit", "-q", "--allow-empty", "-m", "drift")
+	subRun("commit", "-q", "--allow-empty", "-m", "advance past the recorded gitlink")
 	drift := subRun("rev-parse", "HEAD")
 	st, msg = runMaintenanceVerbIn(dir, "git-submodules", map[string]any{"mode": "verify"})
 	if st != spec.StatusFail {
-		t.Fatalf("a checkout off its gitlink must fail, got %s: %s", st, msg)
+		t.Fatalf("a checkout ahead of its gitlink must fail, got %s: %s", st, msg)
 	}
-	if !strings.Contains(msg, "sub: HEAD "+drift+" != gitlink "+subSHA) {
-		t.Fatalf("the failure must name the drift, got: %q", msg)
+	if !strings.Contains(msg, "sub: unstaged advance (HEAD "+drift+", index gitlink "+subSHA+")") {
+		t.Fatalf("the failure must name the direction and both SHAs, got: %q", msg)
+	}
+	if !strings.Contains(msg, "git add sub") {
+		t.Fatalf("the failure must name the remedy that records the advance, got: %q", msg)
 	}
 
 	// FAIL: a path DECLARED in `.gitmodules` with NO recorded gitlink must fail —
