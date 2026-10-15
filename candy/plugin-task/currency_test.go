@@ -234,6 +234,39 @@ func TestGitSubmodules_CurrencyRefusesStructuralStates(t *testing.T) {
 	}
 }
 
+// TestGitSubmodules_CurrencyJudgesAnExplicitDerivedFrom proves the SECOND edge shape the
+// schema documents: `derived-from:<path>` names a source pin OF THIS REPO, so its value is
+// that pin's recorded gitlink read HERE and its currency is that pin's own state — not a
+// question about `pinned_from`, which such an intent never names.
+func TestGitSubmodules_CurrencyJudgesAnExplicitDerivedFrom(t *testing.T) {
+	tmp := t.TempDir()
+	dir, run, c1, _, _ := curSuper(t, tmp)
+	curRecord(t, dir, "src", c1)
+	curRecord(t, dir, "d", c1) // d's claim: "my value is src's"
+	run("commit", "-qm", "d derives from src in-repo")
+
+	// src is BEHIND its main, so an edge that correctly mirrors a behind source is a LEG.
+	st, msg := runMaintenanceVerbIn(dir, "git-submodules", map[string]any{
+		"mode": "currency", "intent": map[string]any{"d": "derived-from:src"},
+	})
+	if st != spec.StatusPass {
+		t.Fatalf("an in-repo edge over a behind source is a leg; got %s: %s", st, msg)
+	}
+	for _, want := range []string{"blocked-by src (behind)", "derived-from:src"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("the in-repo edge must name its own source and state; missing %q in:\n%s", want, msg)
+		}
+	}
+
+	// A source that is NOT a declared pin cannot be inherited from: named, and refused.
+	st, msg = runMaintenanceVerbIn(dir, "git-submodules", map[string]any{
+		"mode": "currency", "intent": map[string]any{"d": "derived-from:nowhere"},
+	})
+	if st != spec.StatusFail || !strings.Contains(msg, `derived-from source "nowhere" records no gitlink`) {
+		t.Fatalf("an undeclared derived source must be refused BY NAME; got %s: %s", st, msg)
+	}
+}
+
 // TestGitSubmodules_CurrencyNamesTheSquashAdvance pins the class a first cut got wrong: a pin
 // taken before a SQUASH merge is unreachable from the served ref, because the branch advanced
 // without descending from its previous head. MEASURED on the real umbrella, where `charly`'s

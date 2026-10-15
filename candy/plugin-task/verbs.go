@@ -691,16 +691,54 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 			rows = append(rows, r)
 		}
 
-		// Pass 2 — the EDGES, judged only against a source that pass 1 could judge.
+		// Pass 2 — the EDGES, judged only against a source that pass 1 could judge. The two
+		// edge SHAPES a declared intent may take are judged differently, because their
+		// sources live in different places:
+		//   * a `pin_map` entry derives from ANOTHER CHECKOUT (`pinned_from`), so its value
+		//     is that checkout's recorded gitlink for the twin path, and its currency is the
+		//     state of the source's OWN pin at that twin — one hop further than its gitlink;
+		//   * an explicit `derived-from:<path>` derives from a SOURCE PIN OF THIS REPO, so
+		//     its value is that pin's recorded gitlink read HERE, and its currency is that
+		//     pin's own state. Judging it against `pinned_from` would answer a question the
+		//     caller did not ask.
 		for i := range rows {
 			if rows[i].leaf {
 				continue
 			}
-			p, src := rows[i].path, in.PinnedFrom
-			twin, ok := in.PinMap[p]
-			if !ok {
-				twin = src // an explicit derived-from:<path> names the source path itself
+			p := rows[i].path
+			twin, viaPinMap := in.PinMap[p]
+			if !viaPinMap {
+				src := strings.TrimSpace(strings.TrimPrefix(rows[i].intent, "derived-from:"))
+				want := gitlink(projDir, src)
+				rows[i].served = want
+				switch {
+				case src == "":
+					rows[i].state = "no-source-pin"
+					structural = append(structural, fmt.Sprintf(
+						"%s: an explicit derived-from intent names no source path", p))
+				case want == "":
+					rows[i].state = "no-source-pin"
+					structural = append(structural, fmt.Sprintf(
+						"%s: derived-from source %q records no gitlink in this repo's index", p, src))
+				case want != rows[i].recorded:
+					rows[i].state = "pin-mismatch"
+					structural = append(structural, fmt.Sprintf(
+						"pin-mismatch: %s records %s but its declared source %s records %s",
+						p, short(rows[i].recorded), src, short(want)))
+				default:
+					if srcState, judged := stateOf[src]; !judged {
+						rows[i].state = "blocked-by " + src + " (not a declared pin)"
+						structural = append(structural, fmt.Sprintf(
+							"%s: derived-from source %q is not one of this repo's declared pins, so it has no state to inherit", p, src))
+					} else if srcState == "cur" {
+						rows[i].state = "cur"
+					} else {
+						rows[i].state = "blocked-by " + src + " (" + srcState + ")"
+					}
+				}
+				continue
 			}
+			src := in.PinnedFrom
 			want := submoduleGitlink(projDir, src, twin)
 			rows[i].served = want
 			switch {
