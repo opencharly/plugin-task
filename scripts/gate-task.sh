@@ -507,6 +507,71 @@ fi
 echo "$exp_out" | grep -q 'graph depth > 1' || { echo "FAIL: the refusal must name the depth; got: $exp_out" >&2; exit 1; }
 echo "$exp_out" | grep -q 'which is ITSELF an edge' || { echo "FAIL: the refusal must name the source's shape; got: $exp_out" >&2; exit 1; }
 
+# ---------------------------------------------------------------------------
+# 2b) verb:git-submodules currency — the STALENESS bound.
+#
+# The bound is on THIS repo's OWN advance cadence — the AGE of the last commit
+# that touched the pin — and never on the pin's distance from the served ref.
+# MEASURED on charly's own six box/* twins: each is behind its served ref about
+# 75% of wall-clock time, with continuous behind-windows of 8 and 10 days, while
+# the healthy maximum gap between advances was 5 days. A gate on the DISTANCE
+# would therefore be red on a healthy tree, which trains every reader to ignore
+# it. The AGE is what neglect looks like.
+#
+# The two fixtures below are the SAME tree with the SAME behind pin and the SAME
+# bound; they differ ONLY in the date of the commit that recorded the pin, and
+# the verdict flips with it. That difference is the whole point of the knob.
+# ---------------------------------------------------------------------------
+. "$FIX/shas"
+stale_fixture() {
+  local dir="$1" stamp="$2"
+  mkdir -p "$dir"
+  (
+    cd "$dir" && git init -q -b main
+    echo u > u.txt && git add -A && G commit -qm u
+    printf '[submodule "gap"]\n\tpath = gap\n\turl = %s\n\tbranch = main\n' "$FIX/subsrc" > .gitmodules
+    git add .gitmodules && G commit -qm gm
+    git update-index --add --cacheinfo "160000,$C1,gap"
+    GIT_AUTHOR_DATE="$stamp" GIT_COMMITTER_DATE="$stamp" G commit -qm "pin gap"
+    # Materialize the checkout so the pin is judged against the served ref (behind),
+    # not merely "differs (no checkout to judge ancestry)".
+    git -c protocol.file.allow=always submodule update --init -q gap
+  )
+  cat > "$dir/charly.yml" <<'YML'
+currency-stale:
+  task:
+    description: ask whether every pin is current, with a bound on this repo's own neglect
+    dir: .
+    plan:
+      - check: no pin is neglected past the bound
+        git-submodules: {mode: currency, stale_after: "168h"}
+        context: [runtime]
+YML
+}
+
+echo "== verb:git-submodules currency (stale_after: a pin NEGLECTED past the bound must FAIL) =="
+stale_fixture "$WORK/stale-old" "2020-01-01T00:00:00Z"
+if stale_out="$(cd "$WORK/stale-old" && "$CH" task currency-stale 2>&1)"; then
+  echo "FAIL: a pin neglected for years must fail the bound" >&2; exit 1
+fi
+printf '%s\n' "$stale_out" | grep -q 'STALE pin(s)' || {
+  echo "FAIL: the verdict must name the stale pin(s); got: $stale_out" >&2; exit 1; }
+printf '%s\n' "$stale_out" | grep -q 'has not advanced it for' || {
+  echo "FAIL: the verdict must name the age; got: $stale_out" >&2; exit 1; }
+printf '%s\n' "$stale_out" | grep -q '(bound 168h)' || {
+  echo "FAIL: the verdict must name the bound; got: $stale_out" >&2; exit 1; }
+printf '%s\n' "$stale_out" | sed 's/^/   | /'
+
+echo "== verb:git-submodules currency (stale_after: the SAME pin, advanced recently, must PASS) =="
+stale_fixture "$WORK/stale-fresh" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+fresh_out="$(cd "$WORK/stale-fresh" && "$CH" task currency-stale 2>&1)" || {
+  echo "FAIL: a pin advanced just now is churn, not neglect" >&2; printf '%s\n' "$fresh_out" >&2; exit 1; }
+printf '%s\n' "$fresh_out" | grep -q '0 failed' || {
+  echo "FAIL: the run must pass; got: $fresh_out" >&2; exit 1; }
+printf '%s\n' "$fresh_out" | grep -q '1 of 1 pin(s) NOT current' || {
+  echo "FAIL: the not-current count must still be reported; got: $fresh_out" >&2; exit 1; }
+echo "   the same behind pin, advanced recently, passed the bound"
+
 echo "== verb:file-parity (identical must PASS, drift must FAIL) =="
 par_out="$("$CH" task parity)"; echo "$par_out" | grep -q '0 failed' || { echo "FAIL: identical pair must pass" >&2; exit 1; }
 echo drifted >> r.copy

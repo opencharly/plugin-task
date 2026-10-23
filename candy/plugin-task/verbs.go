@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/opencharly/plugin-task/candy/plugin-task/params"
 	pb "github.com/opencharly/spec/proto"
@@ -859,6 +861,25 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		// on them would be permanently red — which trains every reader to ignore it, the
 		// mirror problem inverted. So the Message LEADS with the number of pins that are
 		// not current, and a green run can never read as "everything is fine".
+		//
+		// The owner's own bound on its OWN bookkeeping, opt-in (`stale_after`). It answers the
+		// question the currency report cannot: a pin that is not current is CHURN (a busy
+		// upstream is behind between every wave), but a pin that is not current AND that this
+		// repo has not advanced for longer than the bound is NEGLECT. The bound is on the AGE
+		// of this repo's last advance of that path — NOT on the pin's distance from the ref it
+		// names. A gate on the DISTANCE would be permanently red on a healthy tree, which
+		// trains every reader to ignore it; the AGE is what neglect looks like, and it is
+		// what a healthy tree keeps small.
+		var staleAfter time.Duration
+		staleBoundSet := false
+		if raw := strings.TrimSpace(in.StaleAfter); raw != "" {
+			d, err := time.ParseDuration(raw)
+			if err != nil {
+				return spec.StatusFail, fmt.Sprintf(
+					"git-submodules: stale_after %q is not a duration this verb can parse (e.g. \"168h\")", raw)
+			}
+			staleAfter, staleBoundSet = d, true
+		}
 		type pin struct {
 			path, intent, recorded, served, which, state string
 		}
@@ -933,6 +954,56 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 				ref = ref[:i]
 			}
 			return strings.TrimSpace(ref)
+		}
+
+		// durText renders a bound or an age in the OWNER's own units: whole hours as "168h",
+		// so the report echoes the bound the owner wrote rather than a Go duration literal.
+		durText := func(d time.Duration) string {
+			if d%time.Hour == 0 {
+				return fmt.Sprintf("%dh", int(d/time.Hour))
+			}
+			return d.String()
+		}
+
+		// staleEligible names the states that mean "THIS repo's own pin does not hold the
+		// value its intent names" — the only states whose neglect is THIS repo's business.
+		// An EDGE that is `blocked-by` is NOT eligible: the producer's neglect is the
+		// producer's business, and failing here over another repo's PR would be exactly the
+		// permanently-red gate the org's pin rule forbids.
+		staleEligible := func(state string) bool {
+			switch {
+			case state == "behind", state == "not-on-the-served-line":
+				return true
+			case strings.HasPrefix(state, "differs"):
+				// The recorded value differs from the served one and no checkout was
+				// available to classify the difference. It is still NOT CURRENT.
+				return true
+			}
+			return false
+		}
+
+		// lastAdvancedAt reads the AGE of this repo's OWN bookkeeping for a pin: the
+		// timestamp of the last commit that touched the pin's path. This is the owner's own
+		// record of when it last advanced the pin — never the pin's distance from the served
+		// ref, which is churn. An ABSENT record (the path is in no commit of this repo's
+		// history) is reported as "never advanced here" rather than as a fresh pin, because
+		// a path with no bookkeeping has not been advanced for as long as the repo has
+		// existed.
+		lastAdvancedAt := func(p string) (time.Time, bool) {
+			out, _, exit := hostCapture(context.Background(), projDir,
+				fmt.Sprintf("git log -1 --format=%%ct -- %s", shellQuote(p)))
+			if exit != 0 {
+				return time.Time{}, false
+			}
+			ts := strings.TrimSpace(out)
+			if ts == "" {
+				return time.Time{}, false
+			}
+			secs, err := strconv.ParseInt(ts, 10, 64)
+			if err != nil {
+				return time.Time{}, false
+			}
+			return time.Unix(secs, 0), true
 		}
 
 		// THE GRAPH, classified once for EVERY path, then the depth rule walked over EVERY
@@ -1137,6 +1208,33 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 			// guard is what retired it. Recording it anyway is the write-only state R2 deletes.
 		}
 
+		// The NEGLECT judgement (opt-in). A pin that is not current AND that this repo has
+		// not advanced for longer than the owner's bound is STALE, and it FAILS. The bound
+		// is on this repo's OWN bookkeeping age, so a healthy tree stays green while a
+		// neglected one goes red — the two regimes the bound is calibrated against.
+		var stale []string
+		if staleBoundSet {
+			now := time.Now()
+			for _, r := range rows {
+				if !r.leaf || !staleEligible(r.state) {
+					continue
+				}
+				at, known := lastAdvancedAt(r.path)
+				if !known {
+					stale = append(stale, fmt.Sprintf(
+						"%s: %s, and this repo's own history records no advance of it — it has never been advanced here",
+						r.path, r.state))
+					continue
+				}
+				age := now.Sub(at)
+				if age > staleAfter {
+					stale = append(stale, fmt.Sprintf(
+						"%s: %s, and this repo has not advanced it for %s (bound %s) — advance it: mode=bump advances every pin to the ref its intent names",
+						r.path, r.state, durText(age.Round(time.Hour)), durText(staleAfter)))
+				}
+			}
+		}
+
 		// Render: the count of pins that are NOT current leads, because a green run must
 		// never be readable as "everything is fine".
 		byState := map[string]int{}
@@ -1209,10 +1307,18 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		if len(detail) > 0 {
 			head += "; NOT CURRENT: " + strings.Join(detail, "; ")
 		}
+		if len(stale) > 0 {
+			head += fmt.Sprintf("; %d STALE pin(s) (neglected for more than %s): %s",
+				len(stale), durText(staleAfter), strings.Join(stale, "; "))
+		}
 		if len(structural) > 0 {
 			sort.Strings(structural)
 			return spec.StatusFail, fmt.Sprintf("%s; %d STRUCTURAL failure(s): %s; producer-first legs: %s",
 				head, len(structural), strings.Join(structural, "; "), legText)
+		}
+		if len(stale) > 0 {
+			return spec.StatusFail, fmt.Sprintf("%s; FAILED on the STALE pin(s) above; producer-first legs: %s",
+				head, legText)
 		}
 		return spec.StatusPass, fmt.Sprintf("%s; producer-first legs: %s", head, legText)
 
