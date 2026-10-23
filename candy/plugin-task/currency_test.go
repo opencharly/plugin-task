@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/opencharly/spec/spec"
 )
@@ -398,5 +399,116 @@ func TestGitSubmodules_CurrencyRefusesDepthForBOTHEdgeShapes(t *testing.T) {
 				t.Fatalf("the refused edge must name its own refusal as its state; missing %q in:\n%s", arm.refusal, msg)
 			}
 		})
+	}
+}
+
+// curStale builds the fixture the staleness arms need: a superproject whose `src` pin is
+// either behind its upstream (`behind`) or at it (`current`), whose `d` pin is current, and
+// whose LAST commit — the one that touched the pins — is dated `ago` in the past.
+//
+// The date is the fixture's whole point: the age of this repo's own bookkeeping for a pin
+// is read from that commit, so the same tree is the healthy regime or the neglect regime
+// depending only on when it was last advanced.
+func curStale(t *testing.T, tmp, name string, behind bool, ago time.Duration) (dir, c1, c2 string) {
+	t.Helper()
+	dir, run, c1, c2, _ := curSuper(t, filepath.Join(tmp, name))
+	curRecord(t, dir, "d", c2) // current: isolates the arm under test
+	if behind {
+		curRecord(t, dir, "src", c1)
+	} else {
+		curRecord(t, dir, "src", c2)
+	}
+	stamp := time.Now().Add(-ago).UTC().Format(time.RFC3339)
+	t.Setenv("GIT_AUTHOR_DATE", stamp)
+	t.Setenv("GIT_COMMITTER_DATE", stamp)
+	run("commit", "-qm", "record the pins")
+	return dir, c1, c2
+}
+
+// TestGitSubmodules_CurrencyStalenessBoundsNeglect proves the control that the recurring
+// stale twin needed — a bound on NEGLECT, not on churn.
+//
+// The measurement behind it: a twin whose upstream moves daily is behind its served ref
+// roughly 75% of wall-clock time, with continuous behind-windows of 8 and 10 days. A gate
+// that failed on the DISTANCE would therefore be red on a healthy tree, which trains every
+// reader to ignore it. What actually recurred was charly's own ADVANCE CADENCE: gaps of
+// 8 and 10 days with no advance at all, against a healthy maximum of 5 days.
+//
+// So the bound is on the AGE of this repo's last advance of a pin, and the arms below are
+// a one-variable differential: the same tree, the same pin, the same bound — only the date
+// of the last advance differs, and the verdict flips with it.
+func TestGitSubmodules_CurrencyStalenessBoundsNeglect(t *testing.T) {
+	tmp := t.TempDir()
+	bound := "168h"
+
+	// Arm 1 — the tree as it is, with the knob UNSET: the verdict is the structural one
+	// alone, exactly as before the knob existed. The opt-in is real, and a repo that has
+	// not declared a bound sees no change at all.
+	oldDir, _, _ := curStale(t, tmp, "old", true, 240*time.Hour)
+	st, msg := runMaintenanceVerbIn(oldDir, "git-submodules", map[string]any{"mode": "currency"})
+	if st != spec.StatusPass {
+		t.Fatalf("without a declared bound the verdict must be unchanged; got %s: %s", st, msg)
+	}
+	if !strings.Contains(msg, "1 of 2 pin(s) NOT current") || strings.Contains(msg, "STALE") {
+		t.Fatalf("an undeclared bound must not mention staleness; got:\n%s", msg)
+	}
+
+	// Arm 2 — the same tree WITH the bound: the pin is behind AND this repo has not
+	// advanced it for 240h, which is past the 168h bound, so it is STALE and FAILS.
+	st, msg = runMaintenanceVerbIn(oldDir, "git-submodules", map[string]any{
+		"mode": "currency", "stale_after": bound,
+	})
+	if st != spec.StatusFail {
+		t.Fatalf("a pin neglected for longer than the bound must fail; got %s: %s", st, msg)
+	}
+	for _, want := range []string{
+		"1 STALE pin(s) (neglected for more than 168h)",
+		"src: behind, and this repo has not advanced it for 240h",
+		"(bound 168h)",
+		"FAILED on the STALE pin(s) above",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("the stale verdict must name the pin, its age and the bound; missing %q in:\n%s", want, msg)
+		}
+	}
+
+	// Arm 3 — THE DIFFERENTIAL. The same tree, the same behind pin, the same bound, and the
+	// ONLY difference is when this repo last advanced it: an advance a minute ago is
+	// CHURN-IN-PROGRESS, not neglect, so the run PASSES. A control that failed here would
+	// be red on a healthy tree, which is the failure this knob exists to avoid.
+	freshDir, _, _ := curStale(t, tmp, "fresh", true, time.Minute)
+	st, msg = runMaintenanceVerbIn(freshDir, "git-submodules", map[string]any{
+		"mode": "currency", "stale_after": bound,
+	})
+	if st != spec.StatusPass {
+		t.Fatalf("a pin advanced a minute ago is churn, not neglect; got %s: %s", st, msg)
+	}
+	if strings.Contains(msg, "STALE") {
+		t.Fatalf("a recently advanced pin must not be stale; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "1 of 2 pin(s) NOT current") {
+		t.Fatalf("the not-current count must still be reported; got:\n%s", msg)
+	}
+
+	// Arm 4 — the IDLE-UPSTREAM trap: a pin that is CURRENT but was advanced a long time
+	// ago. An upstream that has not moved is not neglected, and the bound must not fire on
+	// it — otherwise every quiet repo in the org goes red on its own silence.
+	idleDir, _, _ := curStale(t, tmp, "idle", false, 240*time.Hour)
+	st, msg = runMaintenanceVerbIn(idleDir, "git-submodules", map[string]any{
+		"mode": "currency", "stale_after": bound,
+	})
+	if st != spec.StatusPass {
+		t.Fatalf("a current pin is never stale, however old its last advance; got %s: %s", st, msg)
+	}
+	if strings.Contains(msg, "STALE") {
+		t.Fatalf("a current pin must not be reported stale; got:\n%s", msg)
+	}
+
+	// Arm 5 — a malformed bound is a loud failure, never a silently disabled control.
+	st, msg = runMaintenanceVerbIn(oldDir, "git-submodules", map[string]any{
+		"mode": "currency", "stale_after": "7d",
+	})
+	if st != spec.StatusFail || !strings.Contains(msg, "not a duration") {
+		t.Fatalf("a malformed bound must fail loud; got %s: %s", st, msg)
 	}
 }

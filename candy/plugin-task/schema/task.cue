@@ -55,6 +55,18 @@
 	intent?: {[string]: string} @go(Intent)
 	// skip lists submodule paths the verb must not touch.
 	skip?: [...string]
+	// stale_after is the OWNER's bound on its OWN bookkeeping, and it is opt-in: unset
+	// => the knob is off and the currency verdict is the structural one alone.
+	//
+	// It is a duration ("168h"). A pin that is not current AND that this repo has not
+	// advanced for LONGER than this bound is STALE, and a stale pin FAILS.
+	//
+	// The bound is on the AGE of this repo's last advance of that path — NOT on the
+	// pin's distance from the ref it names. The distance is CHURN: a busy upstream is
+	// behind between every wave, so a gate that failed on the distance would be
+	// permanently red on a healthy tree, and a permanently red gate trains every reader
+	// to ignore it. The age is NEGLECT, and neglect is the defect this bounds.
+	stale_after?: string @go(StaleAfter)
 }
 
 // #FileParityInput asserts (or syncs) that paired files are byte-identical.

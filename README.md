@@ -67,6 +67,16 @@ currency:
             box/arch: box/arch
         context: [runtime]
 
+# `stale_after` is OPT-IN and bounds NEGLECT, not churn. A pin that is not current
+# AND that this repo has not advanced for LONGER than the bound is STALE, and a
+# stale pin FAILS. The bound is on the AGE of this repo's last advance of that
+# path — never on the pin's distance from the served ref: a busy upstream is behind
+# between every wave, so a gate that failed on the distance would be permanently
+# red on a healthy tree, which trains every reader to ignore it. Leave it unset and
+# the verdict is the structural one alone.
+#
+#   git-submodules: {mode: currency, stale_after: "168h"}
+
 # Assert the harness config files are identical to charly's twins.
 harness:
   task:
