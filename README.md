@@ -75,6 +75,14 @@ currency:
 # red on a healthy tree, which trains every reader to ignore it. Leave it unset and
 # the verdict is the structural one alone.
 #
+# The bound must be a POSITIVE duration: zero (or less) is refused rather than
+# honoured, because it would mark EVERY not-current pin stale — the permanently-red
+# gate this knob exists to avoid.
+#
+# The age is read from this repo's OWN history, and an UNREADABLE history is never
+# reported as neglect: it is a structural failure that names the read error, because
+# an unknown age is not a claim that the owner neglected the pin.
+#
 #   git-submodules: {mode: currency, stale_after: "168h"}
 
 # Assert the harness config files are identical to charly's twins.

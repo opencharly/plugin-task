@@ -572,6 +572,47 @@ printf '%s\n' "$fresh_out" | grep -q '1 of 1 pin(s) NOT current' || {
   echo "FAIL: the not-current count must still be reported; got: $fresh_out" >&2; exit 1; }
 echo "   the same behind pin, advanced recently, passed the bound"
 
+echo "== verb:git-submodules currency (stale_after: a NON-POSITIVE bound must be REFUSED) =="
+# Zero (or less) is not a bound: it would mark EVERY not-current pin stale, which is
+# the permanently-red gate the knob exists to avoid. The verb refuses it rather than
+# honouring an operator error that would silently disarm the control in the other
+# direction.
+cat > "$WORK/stale-old/charly.yml" <<'YML'
+currency-nonpositive:
+  task:
+    description: a bound of zero is refused, not honoured
+    dir: .
+    plan:
+      - check: no pin is neglected past the bound
+        git-submodules: {mode: currency, stale_after: "0s"}
+        context: [runtime]
+YML
+if nonpos_out="$(cd "$WORK/stale-old" && "$CH" task currency-nonpositive 2>&1)"; then
+  echo "FAIL: a non-positive bound must be refused" >&2; printf '%s\n' "$nonpos_out" >&2; exit 1
+fi
+printf '%s\n' "$nonpos_out" | grep -q 'not a POSITIVE duration' || {
+  echo "FAIL: the refusal must name the reason; got: $nonpos_out" >&2; exit 1; }
+printf '%s\n' "$nonpos_out" | grep -q 'STALE pin(s)' && {
+  echo "FAIL: a refused bound must not judge staleness; got: $nonpos_out" >&2; exit 1; }
+echo "   a bound of zero was refused, and no staleness was judged"
+
+echo "== verb:git-submodules currency (an UNREADABLE history is not neglect) =="
+# The same neglect fixture, with its HEAD commit object removed, so the history
+# genuinely cannot be read. The age of the last advance is then UNKNOWN — and an
+# unknown is not a claim that the owner neglected the pin. The verdict names the read
+# failure and never says STALE.
+stale_fixture "$WORK/stale-unreadable" "2020-01-01T00:00:00Z"
+unread_sha="$(cd "$WORK/stale-unreadable" && git rev-parse HEAD)"
+rm -f "$WORK/stale-unreadable/.git/objects/${unread_sha:0:2}/${unread_sha:2}"
+if unread_out="$(cd "$WORK/stale-unreadable" && "$CH" task currency-stale 2>&1)"; then
+  echo "FAIL: an unreadable history must fail, not pass" >&2; printf '%s\n' "$unread_out" >&2; exit 1
+fi
+printf '%s\n' "$unread_out" | grep -q 'could not be read' || {
+  echo "FAIL: the verdict must name the read failure; got: $unread_out" >&2; exit 1; }
+printf '%s\n' "$unread_out" | grep -q 'STALE pin(s)' && {
+  echo "FAIL: an unreadable history must never be reported as neglect; got: $unread_out" >&2; exit 1; }
+echo "   an unreadable history was reported as unreadable, not as neglect"
+
 echo "== verb:file-parity (identical must PASS, drift must FAIL) =="
 par_out="$("$CH" task parity)"; echo "$par_out" | grep -q '0 failed' || { echo "FAIL: identical pair must pass" >&2; exit 1; }
 echo drifted >> r.copy
