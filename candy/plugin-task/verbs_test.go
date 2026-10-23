@@ -518,14 +518,19 @@ func TestGitSubmodules_BumpOrder(t *testing.T) {
 	}
 }
 
-// TestGitSubmodules_BumpUninitializedFailsLoud proves charly#768's fix: a submodule
-// directory that is present-but-UNINITIALIZED (no `.git`) must make `bump` FAIL LOUD
-// and must NOT be operated on through git's walk-up to the superproject. Before the
-// fix, `git -C <empty-submodule-dir> switch --detach` switched the UMBRELLA.
-func TestGitSubmodules_BumpUninitializedFailsLoud(t *testing.T) {
+// TestGitSubmodules_BumpAdvancesUnmaterializedPinInIndex proves the change
+// opencharly/plugin-task#37 asks for: a submodule path that is DECLARED but has NO
+// CHECKOUT is not a broken pin and not a fatal condition — the bump advances its pin
+// IN THE INDEX, from the remote's own tip, without materializing anything.
+//
+// It also pins charly#768's invariant, which the old fail-loud behaviour used to
+// enforce by refusing: no git operation runs inside the uninitialized directory, so
+// git's walk-up to the superproject stays impossible. The umbrella must come out of
+// the bump EXACTLY where it went in.
+func TestGitSubmodules_BumpAdvancesUnmaterializedPinInIndex(t *testing.T) {
 	base := t.TempDir()
 
-	// A leaf submodule SOURCE with two commits (so there is a real ref to switch to).
+	// A leaf submodule SOURCE with one commit (so there is a real remote tip to read).
 	leaf := filepath.Join(base, "leaf")
 	run := func(dir string, args ...string) string {
 		t.Helper()
@@ -552,6 +557,7 @@ func TestGitSubmodules_BumpUninitializedFailsLoud(t *testing.T) {
 	writeFile(t, filepath.Join(leaf, "f"), "L1")
 	run(leaf, "add", "-A")
 	run(leaf, "commit", "-qm", "L1")
+	leafTip := run(leaf, "rev-parse", "HEAD")
 	leafBare := filepath.Join(base, "leaf.git")
 	run(base, "clone", "-q", "--bare", leaf, leafBare)
 
@@ -581,9 +587,9 @@ func TestGitSubmodules_BumpUninitializedFailsLoud(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(umb, "target", ".git")); err == nil {
 		t.Fatalf("fixture precondition: target must have no .git")
 	}
-	// Give the UMBRELLA an `origin` with an `origin/main` ref, so that pre-fix the
-	// `git -C target switch --detach origin/main` walk-up would GENUINELY switch the
-	// umbrella (the real charly#768 regression) rather than erroring out.
+	// Give the UMBRELLA an `origin` with an `origin/main` ref, so that the walk-up
+	// this test guards against would GENUINELY switch the umbrella (the real
+	// charly#768 regression) rather than erroring out.
 	umbOrigin := filepath.Join(base, "umb-origin.git")
 	run(base, "clone", "-q", "--bare", umb, umbOrigin)
 	run(umb, "remote", "add", "origin", umbOrigin)
@@ -594,15 +600,23 @@ func TestGitSubmodules_BumpUninitializedFailsLoud(t *testing.T) {
 	umbHeadBefore := run(umb, "rev-parse", "HEAD")
 	umbBranchBefore := run(umb, "rev-parse", "--abbrev-ref", "HEAD")
 
-	// bump over the WHOLE module set (no pin_map) — `target` rolls to origin/main.
+	// bump over the WHOLE module set (no pin_map) — `target` advances to the remote's tip.
 	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
-	if st != spec.StatusFail {
-		t.Fatalf("bump over an uninitialized submodule must FAIL LOUD, got %s: %s", st, msg)
+	if st != spec.StatusFail && st != spec.StatusPass {
+		t.Fatalf("bump: %s: %s", st, msg)
 	}
-	if !strings.Contains(msg, "not an initialized checkout") {
-		t.Fatalf("failure must name the uninitialized checkout, got: %s", msg)
+	if st != spec.StatusPass {
+		t.Fatalf("a bump over an UNMATERIALIZED path must not fail the run, got %s: %s", st, msg)
 	}
-
+	// THE ASSERTION: the PIN moved, in the index, to the value the remote serves.
+	if got := gitlink(umb, "target"); got != leafTip {
+		t.Fatalf("the unmaterialized pin was not advanced in the index: gitlink=%s want the remote's tip %s", got, leafTip)
+	}
+	// AND NOTHING WAS MATERIALIZED: the point of the change is that a wave never has
+	// to clone a repo to record where it is pinned.
+	if _, err := os.Stat(filepath.Join(umb, "target", ".git")); err == nil {
+		t.Fatalf("the bump materialized %q — the pin belongs in the index, not in a checkout", "target")
+	}
 	// THE REGRESSION ASSERTION: the umbrella must be EXACTLY where it was — same
 	// HEAD, same branch. Pre-fix, `git -C target switch --detach origin/main` walked
 	// up and detached the umbrella.
@@ -614,7 +628,13 @@ func TestGitSubmodules_BumpUninitializedFailsLoud(t *testing.T) {
 	}
 }
 
-func TestGitSubmodules_BumpReportsUninitializedOnce(t *testing.T) {
+// TestGitSubmodules_BumpSummaryReportsTheIndexAdvance proves the SUMMARY tells the
+// reader which of the two things happened to each pin: a path with a checkout was
+// ROLLED in that checkout, a path with none was ADVANCED IN THE INDEX. The old
+// vocabulary — the "not an initialized checkout" precondition, which the bump refused
+// over — is GONE, because the bump no longer refuses: a pin that lives in the index
+// is a pin, and the summary says which way it moved.
+func TestGitSubmodules_BumpSummaryReportsTheIndexAdvance(t *testing.T) {
 	base := t.TempDir()
 
 	// A leaf submodule SOURCE with two commits (so there is a real ref to switch to).
@@ -686,26 +706,24 @@ func TestGitSubmodules_BumpReportsUninitializedOnce(t *testing.T) {
 	umbHeadBefore := run(umb, "rev-parse", "HEAD")
 	umbBranchBefore := run(umb, "rev-parse", "--abbrev-ref", "HEAD")
 
-	// bump over the WHOLE module set (no pin_map) — `target` rolls to origin/main.
+	// bump over the WHOLE module set (no pin_map) — `target` advances in the index.
 	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
-	if st != spec.StatusFail {
-		t.Fatalf("bump over an uninitialized submodule must FAIL LOUD, got %s: %s", st, msg)
+	if st != spec.StatusPass {
+		t.Fatalf("bump over an unmaterialized submodule must PASS, got %s: %s", st, msg)
 	}
-	// THE COLLAPSE, asserted so this test FAILS on the pre-change tree: there the message was
-	// "bumped ...; 1 FAILED: submodule %q is not an initialized checkout" - a per-path failure list.
-	// The phrase below ("N submodule(s) not an initialized checkout (name)") is new, and the FAILED
-	// list is gone, so neither assertion can pass before this change.
-	if !strings.Contains(msg, "1 submodule(s) not an initialized checkout") {
-		t.Fatalf("the count must be reported once, in the new form; got: %s", msg)
+	// THE ASSERTION: the summary says the pin was advanced IN THE INDEX. Pre-change this
+	// run FAILED with "1 submodule(s) not an initialized checkout (target)", so neither the
+	// verdict nor the wording can pass on the old tree.
+	if !strings.Contains(msg, "in the index") {
+		t.Fatalf("the summary must report the index advance, got: %s", msg)
 	}
-	if !strings.Contains(msg, "(target)") {
-		t.Fatalf("the report must NAME the uninitialized paths; got: %s", msg)
+	// And the LEGACY vocabulary is gone: the bump no longer refuses over an unmaterialized
+	// path, so the phrase that refusal used is not in the summary any more (R5).
+	if strings.Contains(msg, "not an initialized checkout") {
+		t.Fatalf("the legacy uninitialized-checkout refusal is gone from the bump summary; got: %s", msg)
 	}
 	if strings.Contains(msg, "FAILED") {
-		t.Fatalf("the per-path failure list must be gone (one report, not N failures); got: %s", msg)
-	}
-	if n := strings.Count(msg, "not an initialized checkout"); n != 1 {
-		t.Fatalf("the condition must be reported exactly ONCE, got %d occurrences: %s", n, msg)
+		t.Fatalf("the bump must not report a failure it did not have; got: %s", msg)
 	}
 
 	// THE REGRESSION ASSERTION: the umbrella must be EXACTLY where it was — same
@@ -718,7 +736,7 @@ func TestGitSubmodules_BumpReportsUninitializedOnce(t *testing.T) {
 		t.Fatalf("umbrella branch changed: %q -> %q (the walk-up detach regression)", umbBranchBefore, got)
 	}
 	// The gating: the SAME tree in `status` mode must still succeed and still carry its marker -
-	// the injection is scoped to bump, and status never consults `skipped`.
+	// the change is scoped to bump, and status still reports the uninitialized path as it did.
 	stStatus, msgStatus := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "status"})
 	if stStatus == spec.StatusFail {
 		t.Fatalf("status must not fail on an uninitialized gitlink; got: %s", msgStatus)
