@@ -524,7 +524,13 @@ echo "$exp_out" | grep -q 'which is ITSELF an edge' || { echo "FAIL: the refusal
 # ---------------------------------------------------------------------------
 . "$FIX/shas"
 stale_fixture() {
-  local dir="$1" stamp="$2"
+  # The task name and the bound are parameters because every arm's output must be
+  # identifiable by ITSELF. Two arms used to share one fixture — and therefore one
+  # recorded SHA — so an evidence paste keyed only by the SHA was ambiguous: the
+  # same key selected the healthy arm's verdict. Now each arm has its OWN fixture
+  # (so its own SHA) and its OWN task name (which appears in its own output), and
+  # an evidence paste is keyed by the arm, not by a SHA.
+  local dir="$1" stamp="$2" task="${3:-currency-stale}" bound="${4:-168h}"
   mkdir -p "$dir"
   (
     cd "$dir" && git init -q -b main
@@ -537,14 +543,14 @@ stale_fixture() {
     # not merely "differs (no checkout to judge ancestry)".
     git -c protocol.file.allow=always submodule update --init -q gap
   )
-  cat > "$dir/charly.yml" <<'YML'
-currency-stale:
+  cat > "$dir/charly.yml" <<YML
+$task:
   task:
     description: ask whether every pin is current, with a bound on this repo's own neglect
     dir: .
     plan:
       - check: no pin is neglected past the bound
-        git-submodules: {mode: currency, stale_after: "168h"}
+        git-submodules: {mode: currency, stale_after: "$bound"}
         context: [runtime]
 YML
 }
@@ -563,14 +569,62 @@ printf '%s\n' "$stale_out" | grep -q '(bound 168h)' || {
 printf '%s\n' "$stale_out" | sed 's/^/   | /'
 
 echo "== verb:git-submodules currency (stale_after: the SAME pin, advanced recently, must PASS) =="
-stale_fixture "$WORK/stale-fresh" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-fresh_out="$(cd "$WORK/stale-fresh" && "$CH" task currency-stale 2>&1)" || {
+stale_fixture "$WORK/stale-fresh" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" currency-fresh
+fresh_out="$(cd "$WORK/stale-fresh" && "$CH" task currency-fresh 2>&1)" || {
   echo "FAIL: a pin advanced just now is churn, not neglect" >&2; printf '%s\n' "$fresh_out" >&2; exit 1; }
 printf '%s\n' "$fresh_out" | grep -q '0 failed' || {
   echo "FAIL: the run must pass; got: $fresh_out" >&2; exit 1; }
 printf '%s\n' "$fresh_out" | grep -q '1 of 1 pin(s) NOT current' || {
   echo "FAIL: the not-current count must still be reported; got: $fresh_out" >&2; exit 1; }
 echo "   the same behind pin, advanced recently, passed the bound"
+
+echo "== verb:git-submodules currency (stale_after: a NON-POSITIVE bound must be REFUSED) =="
+# Zero (or less) is not a bound: it would mark EVERY not-current pin stale, which is
+# the permanently-red gate the knob exists to avoid. The verb refuses it rather than
+# honouring an operator error that would silently disarm the control in the other
+# direction.
+#
+# This arm has its OWN fixture, so its recorded SHA is its own and cannot be confused
+# with the healthy arm's SHA; and its own task name, which appears in its own output.
+stale_fixture "$WORK/stale-nonpositive" "2020-01-01T00:00:00Z" currency-nonpositive 0s
+if nonpos_out="$(cd "$WORK/stale-nonpositive" && "$CH" task currency-nonpositive 2>&1)"; then
+  echo "FAIL: a non-positive bound must be refused" >&2; printf '%s\n' "$nonpos_out" >&2; exit 1
+fi
+printf '%s\n' "$nonpos_out" | sed 's/^/   | /'
+printf '%s\n' "$nonpos_out" | grep -q 'not a POSITIVE duration' || {
+  echo "FAIL: the refusal must name the reason; got: $nonpos_out" >&2; exit 1; }
+printf '%s\n' "$nonpos_out" | grep -q 'STALE pin(s)' && {
+  echo "FAIL: a refused bound must not judge staleness; got: $nonpos_out" >&2; exit 1; }
+echo "   a bound of zero was refused, and no staleness was judged"
+
+echo "== verb:git-submodules currency (an UNREADABLE history is not neglect) =="
+# The same neglect fixture, with its HEAD commit object removed, so the history
+# genuinely cannot be read. The age of the last advance is then UNKNOWN — and an
+# unknown is not a claim that the owner neglected the pin. The verdict names the read
+# failure and never says STALE.
+stale_fixture "$WORK/stale-unreadable" "2020-01-01T00:00:00Z" currency-unreadable
+unread_sha="$(cd "$WORK/stale-unreadable" && git rev-parse HEAD)"
+rm -f "$WORK/stale-unreadable/.git/objects/${unread_sha:0:2}/${unread_sha:2}"
+# DEMONSTRATE that the removal genuinely broke the read the verb performs, so this
+# arm cannot pass for the wrong reason (a no-op removal would leave a readable
+# history and the arm would prove nothing). The very same read must FAIL here and
+# SUCCEED on the healthy fixture.
+if (cd "$WORK/stale-unreadable" && git log -1 --format=%ct -- gap) >/dev/null 2>&1; then
+  echo "FAIL: the unreadable fixture's history read must FAIL, or this arm proves nothing" >&2; exit 1
+fi
+if ! (cd "$WORK/stale-old" && git log -1 --format=%ct -- gap) >/dev/null 2>&1; then
+  echo "FAIL: the healthy fixture's history read must SUCCEED, or the contrast proves nothing" >&2; exit 1
+fi
+echo "   the fixture's history read genuinely fails, and the healthy fixture's succeeds"
+if unread_out="$(cd "$WORK/stale-unreadable" && "$CH" task currency-unreadable 2>&1)"; then
+  echo "FAIL: an unreadable history must fail, not pass" >&2; printf '%s\n' "$unread_out" >&2; exit 1
+fi
+printf '%s\n' "$unread_out" | sed 's/^/   | /'
+printf '%s\n' "$unread_out" | grep -q 'could not be read' || {
+  echo "FAIL: the verdict must name the read failure; got: $unread_out" >&2; exit 1; }
+printf '%s\n' "$unread_out" | grep -q 'STALE pin(s)' && {
+  echo "FAIL: an unreadable history must never be reported as neglect; got: $unread_out" >&2; exit 1; }
+echo "   an unreadable history was reported as unreadable, not as neglect"
 
 echo "== verb:file-parity (identical must PASS, drift must FAIL) =="
 par_out="$("$CH" task parity)"; echo "$par_out" | grep -q '0 failed' || { echo "FAIL: identical pair must pass" >&2; exit 1; }

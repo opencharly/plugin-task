@@ -878,6 +878,14 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 				return spec.StatusFail, fmt.Sprintf(
 					"git-submodules: stale_after %q is not a duration this verb can parse (e.g. \"168h\")", raw)
 			}
+			// A bound of zero or less is not a bound: it marks EVERY not-current pin
+			// stale, which is the permanently-red gate this knob exists to avoid. The
+			// validator's round-1 observation named it, and it is refused here rather
+			// than left to the operator's discretion.
+			if d <= 0 {
+				return spec.StatusFail, fmt.Sprintf(
+					"git-submodules: stale_after %q is not a POSITIVE duration — a bound of zero or less marks every not-current pin stale, which is the permanently-red gate this bound exists to avoid", raw)
+			}
 			staleAfter, staleBoundSet = d, true
 		}
 		type pin struct {
@@ -985,25 +993,50 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		// lastAdvancedAt reads the AGE of this repo's OWN bookkeeping for a pin: the
 		// timestamp of the last commit that touched the pin's path. This is the owner's own
 		// record of when it last advanced the pin — never the pin's distance from the served
-		// ref, which is churn. An ABSENT record (the path is in no commit of this repo's
-		// history) is reported as "never advanced here" rather than as a fresh pin, because
-		// a path with no bookkeeping has not been advanced for as long as the repo has
-		// existed.
-		lastAdvancedAt := func(p string) (time.Time, bool) {
-			out, _, exit := hostCapture(context.Background(), projDir,
+		// ref, which is churn.
+		//
+		// The THREE outcomes are different and must not be conflated, because they mean
+		// different things and only ONE of them is a claim about the pin:
+		//   * a TIMESTAMP — the age, measured;
+		//   * an EMPTY result — the path is in no commit of this repo's history, so this
+		//     repo has never advanced it: its age is unbounded and it IS neglected;
+		//   * a FAILING read — the age could not be measured at all (a broken object
+		//     store, a transient git failure). That is the workflow being unable to JUDGE
+		//     the pin, and it is reported as such — never as neglect, which would be a
+		//     claim the evidence does not support.
+		// The validator's round-1 observation named the conflation; the outcomes are now
+		// separate.
+		//
+		// A repo with NO COMMIT AT ALL is the third case, and it is a FACT rather than a
+		// failure: `git log` refuses on an unborn HEAD, but the refusal means "there is
+		// no history here", which is exactly the "never advanced" claim. It is told apart
+		// from a genuine read failure by COUNTING the repo's commits: zero commits means
+		// there is nothing here to have advanced anything (a fact), while a count that
+		// cannot be produced, or a history that exists but whose age for this path cannot
+		// be read, is a failure to JUDGE.
+		lastAdvancedAt := func(p string) (at time.Time, how, detail string) {
+			out, errOut, exit := hostCapture(context.Background(), projDir,
 				fmt.Sprintf("git log -1 --format=%%ct -- %s", shellQuote(p)))
 			if exit != 0 {
-				return time.Time{}, false
+				cOut, cErr, cExit := hostCapture(context.Background(), projDir, "git rev-list --all --count")
+				if cExit != 0 {
+					return time.Time{}, "read-failed", firstLine(cErr)
+				}
+				if n, perr := strconv.Atoi(strings.TrimSpace(cOut)); perr == nil && n == 0 {
+					// This repo has no commit at all: nothing was ever advanced here.
+					return time.Time{}, "no-history", ""
+				}
+				return time.Time{}, "read-failed", firstLine(errOut)
 			}
 			ts := strings.TrimSpace(out)
 			if ts == "" {
-				return time.Time{}, false
+				return time.Time{}, "no-history", ""
 			}
 			secs, err := strconv.ParseInt(ts, 10, 64)
 			if err != nil {
-				return time.Time{}, false
+				return time.Time{}, "read-failed", "unparsable timestamp " + strconv.Quote(ts)
 			}
-			return time.Unix(secs, 0), true
+			return time.Unix(secs, 0), "ok", ""
 		}
 
 		// THE GRAPH, classified once for EVERY path, then the depth rule walked over EVERY
@@ -1219,8 +1252,18 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 				if !r.leaf || !staleEligible(r.state) {
 					continue
 				}
-				at, known := lastAdvancedAt(r.path)
-				if !known {
+				at, how, detail := lastAdvancedAt(r.path)
+				switch how {
+				case "read-failed":
+					// The age could not be measured. That is the workflow being unable to
+					// JUDGE the pin — a structural-class failure that names the read
+					// error — and NOT a claim that the pin is neglected. A transient git
+					// error must never manufacture a stale verdict.
+					structural = append(structural, fmt.Sprintf(
+						"%s: the age of this repo's own last advance of it could not be read (%s) — the staleness of this pin cannot be judged",
+						r.path, detail))
+					continue
+				case "no-history":
 					stale = append(stale, fmt.Sprintf(
 						"%s: %s, and this repo's own history records no advance of it — it has never been advanced here",
 						r.path, r.state))

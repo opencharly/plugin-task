@@ -511,4 +511,73 @@ func TestGitSubmodules_CurrencyStalenessBoundsNeglect(t *testing.T) {
 	if st != spec.StatusFail || !strings.Contains(msg, "not a duration") {
 		t.Fatalf("a malformed bound must fail loud; got %s: %s", st, msg)
 	}
+
+	// Arm 6 — a NON-POSITIVE bound is refused. Zero (or less) is not a bound: it marks
+	// EVERY not-current pin stale, which is precisely the permanently-red gate this knob
+	// exists to avoid, so it is an operator error the verb refuses rather than honours.
+	// The validator's round-1 observation named it.
+	for _, bad := range []string{"0s", "0", "-1h"} {
+		st, msg = runMaintenanceVerbIn(oldDir, "git-submodules", map[string]any{
+			"mode": "currency", "stale_after": bad,
+		})
+		if st != spec.StatusFail || !strings.Contains(msg, "not a POSITIVE duration") {
+			t.Fatalf("a non-positive bound must be refused; got %s: %s", st, msg)
+		}
+		if strings.Contains(msg, "STALE pin(s)") {
+			t.Fatalf("a refused bound must not judge staleness; got:\n%s", msg)
+		}
+	}
+
+	// Arm 7 — a FAILED READ is not neglect. When the repo's history cannot be read, the
+	// age of the last advance is UNKNOWN, and an unknown is not a claim that the owner
+	// neglected the pin. It is reported as a structural failure that names the read
+	// error — the workflow being unable to JUDGE the pin — and never as a stale verdict.
+	//
+	// The corruption is real: the superproject's HEAD commit object is removed, so the
+	// history genuinely cannot be read. The tree is otherwise the same neglect fixture, so
+	// the ONLY difference from Arm 2 is the readability of the evidence.
+	brokenDir, _, _ := curStale(t, tmp, "broken", true, 240*time.Hour)
+	brokenSHA := curGit(t, "-C", brokenDir, "rev-parse", "HEAD")
+	brokenObj := filepath.Join(brokenDir, ".git", "objects", brokenSHA[:2], brokenSHA[2:])
+	if err := os.Remove(brokenObj); err != nil {
+		t.Fatalf("remove the HEAD commit object: %v", err)
+	}
+	st, msg = runMaintenanceVerbIn(brokenDir, "git-submodules", map[string]any{
+		"mode": "currency", "stale_after": bound,
+	})
+	if st != spec.StatusFail {
+		t.Fatalf("an unreadable history must fail, not pass; got %s: %s", st, msg)
+	}
+	if strings.Contains(msg, "STALE pin(s)") {
+		t.Fatalf("an unreadable history must never be reported as neglect; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "could not be read") {
+		t.Fatalf("an unreadable history must name the read failure; got:\n%s", msg)
+	}
+
+	// Arm 8 — a pin in NO commit of this repo's history. The path is in the index and in
+	// .gitmodules, but this repo has never committed an advance of it, so its age is
+	// unbounded and it IS neglected. This is the third outcome of the read, and it is
+	// the opposite of Arm 7: the history reads FINE here (the repo has commits), it simply
+	// holds no advance of THIS path. A read that returns nothing is a fact about the
+	// bookkeeping, not a failure to read it.
+	noHistDir, run, c1, c2, _ := curSuper(t, filepath.Join(tmp, "nohist"))
+	curRecord(t, noHistDir, "d", c2) // current: isolates the arm under test
+	curRecord(t, noHistDir, "src", c1)
+	// Commit ONLY .gitmodules: the gitlinks stay in the index, so the pins exist for the
+	// currency mode (which reads the INDEX) while no commit of this repo ever touched
+	// the path `src`.
+	run("commit", "-qm", "the modules only", "--", ".gitmodules")
+	st, msg = runMaintenanceVerbIn(noHistDir, "git-submodules", map[string]any{
+		"mode": "currency", "stale_after": bound,
+	})
+	if st != spec.StatusFail {
+		t.Fatalf("a pin this repo has never advanced must fail; got %s: %s", st, msg)
+	}
+	if !strings.Contains(msg, "has never been advanced here") {
+		t.Fatalf("a pin in no commit must be reported as never advanced here; got:\n%s", msg)
+	}
+	if strings.Contains(msg, "could not be read") {
+		t.Fatalf("a readable history must not be reported as unreadable; got:\n%s", msg)
+	}
 }
