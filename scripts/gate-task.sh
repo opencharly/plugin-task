@@ -217,6 +217,15 @@ pins-bump:
       - run: bump
         git-submodules: {mode: bump, pinned_from: ../src, pin_map: {target: target}}
         context: [deploy]
+pins-verify-nested:
+  task:
+    description: a composite that composes pins-verify behind ONE task hop
+    dir: .
+    plan:
+      - run: the outer step (a nested task step)
+        task:
+          task: pins-verify
+        context: [deploy]
 parity:
   task:
     description: file parity
@@ -334,6 +343,28 @@ got="$(git ls-files -s target | awk '{print $2}')"
 
 echo "== verb:git-submodules verify (now current -> must PASS) =="
 verify_out="$("$CH" task pins-verify)"; echo "$verify_out" | grep -q '0 failed' || { echo "FAIL: verify must pass after bump" >&2; exit 1; }
+
+# --- The nested `task:` hop carries a PASSING nested run's OWN report
+# (opencharly/plugin-task#33). The hop used to answer with the bare aggregate
+# "ran N task(s), M step(s) failed", so a caller that composed a verb through
+# `task:` could see that it PASSED but never WHAT it reported — the pin counts, the
+# per-pin states, the producer-first leg order. The pass/fail survived; the coverage
+# did not. This arm proves the report crosses the hop LIVE, on a real pin verb: the
+# umbrella's own `verify` composes the pin verb through `task:` and can show a verdict
+# but never a report.
+echo "== verb:task nested hop (a composite must carry the nested run's OWN report) =="
+nested_out="$("$CH" task pins-verify-nested 2>&1 || true)"
+if ! echo "$nested_out" | grep -q 'policy pin(s) hold across'; then
+  echo "FAIL: the composite dropped the nested run's own report across the task: hop (plugin-task#33)" >&2
+  printf '%s\n' "$nested_out" >&2; exit 1
+fi
+if echo "$nested_out" | grep -q 'ran 1 task(s), 0 step(s) failed'; then
+  echo "FAIL: the bare aggregate must not be the hop's whole answer (plugin-task#33)" >&2
+  printf '%s\n' "$nested_out" >&2; exit 1
+fi
+# Print the LIVE composite verdict so the proof is in this gate's own output.
+printf '%s\n' "$nested_out" | sed 's/^/   | /'
+echo "   the composite carried the nested pin report across the hop"
 
 echo "== verb:git-submodules verify (missing twin -> must FAIL loudly, never vacuous) =="
 if "$CH" task missing-pin; then echo "FAIL: a missing gitlink must fail verify" >&2; exit 1; fi
