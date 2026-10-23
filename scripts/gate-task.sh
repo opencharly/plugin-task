@@ -369,23 +369,26 @@ echo "   the composite carried the nested pin report across the hop"
 echo "== verb:git-submodules verify (missing twin -> must FAIL loudly, never vacuous) =="
 if "$CH" task missing-pin; then echo "FAIL: a missing gitlink must fail verify" >&2; exit 1; fi
 
-echo "== verb:git-submodules bump (uninitialized submodule -> must FAIL loudly, never walk up) =="
-# charly#768: a present-but-uninitialized submodule dir must NOT be operated on via
-# git's walk-up to the umbrella. Build a fixture with an uninit submodule, record the
-# UMBRELLA's HEAD, run bump, and assert (a) it fails and (b) the umbrella is untouched.
+echo "== verb:git-submodules bump (unmaterialized submodule -> the pin advances IN THE INDEX, no checkout) =="
+# opencharly/plugin-task#37: a declared path with NO CHECKOUT is not a broken pin. The
+# bump advances its pin in the SUPERPROJECT's INDEX, to the tip the remote serves, and
+# materializes NOTHING — so a pin wave never has to clone 400 repos to record where
+# they are pinned. The fixture pins the STALE sha (C1) so the advance to C2 is
+# observable, and charly#768's invariant is asserted too: no git operation runs inside
+# the uninitialized directory, so git's walk-up to the superproject stays impossible.
 UNI="$WORK/uninit"; mkdir -p "$UNI"
 (
   cd "$UNI" && git init -q -b main
   echo u > u.txt && git add -A && G commit -qm u
   printf '[submodule "gap"]\n\tpath = gap\n\turl = %s\n\tbranch = main\n' "$FIX/subsrc" > .gitmodules
   git add .gitmodules && G commit -qm gm
-  git update-index --add --cacheinfo "160000,$C2,gap" && G commit -qm pin
+  git update-index --add --cacheinfo "160000,$C1,gap" && G commit -qm pin
   mkdir -p gap   # present-but-UNINITIALIZED
 )
 cat > "$UNI/charly.yml" <<'YML'
 bump-all:
   task:
-    description: bump over a set containing an uninitialized submodule
+    description: bump over a set containing an unmaterialized submodule
     dir: .
     plan:
       - run: bump
@@ -393,7 +396,7 @@ bump-all:
         context: [deploy]
 status-all:
   task:
-    description: list the pins (an uninitialized submodule must not walk up)
+    description: list the pins (an unmaterialized submodule must not walk up)
     dir: .
     plan:
       - check: the pin table reports the submodule
@@ -402,14 +405,18 @@ status-all:
 YML
 umb_head_before="$(git -C "$UNI" rev-parse HEAD)"
 umb_branch_before="$(git -C "$UNI" rev-parse --abbrev-ref HEAD)"
-if (cd "$UNI" && "$CH" task bump-all); then
-  echo "FAIL: bump over an uninitialized submodule must FAIL LOUD" >&2; exit 1
-fi
+bump_uni_out="$(cd "$UNI" && "$CH" task bump-all 2>&1)" || {
+  echo "FAIL: a bump over an unmaterialized path must PASS, not fail the run" >&2
+  printf '%s\n' "$bump_uni_out" >&2; exit 1; }
+printf '%s\n' "$bump_uni_out" | sed 's/^/   | /'
+gap_got="$(git -C "$UNI" ls-files -s gap | awk '{print $2}')"
+[ "$gap_got" = "$C2" ] || { echo "FAIL: the unmaterialized pin was not advanced in the index ($gap_got != $C2)" >&2; exit 1; }
+[ -e "$UNI/gap/.git" ] && { echo "FAIL: the bump materialized 'gap' — the pin belongs in the index" >&2; exit 1; }
 umb_head_after="$(git -C "$UNI" rev-parse HEAD)"
 umb_branch_after="$(git -C "$UNI" rev-parse --abbrev-ref HEAD)"
 [ "$umb_head_before" = "$umb_head_after" ] || { echo "FAIL: the umbrella HEAD moved (walk-up detach): $umb_head_before -> $umb_head_after" >&2; exit 1; }
 [ "$umb_branch_before" = "$umb_branch_after" ] || { echo "FAIL: the umbrella branch changed (walk-up detach): $umb_branch_before -> $umb_branch_after" >&2; exit 1; }
-echo "   uninitialized-submodule bump failed loud; umbrella untouched ($umb_branch_before @ ${umb_head_before:0:9})"
+echo "   unmaterialized pin advanced in the index ($C1 -> ${C2:0:9}); no checkout created; umbrella untouched ($umb_branch_before @ ${umb_head_before:0:9})"
 
 echo "== verb:git-submodules status (uninitialized submodule -> '- (uninitialized)', never the umbrella HEAD) =="
 # charly#768: the status read must go through submoduleAt too. Pre-fix, `git -C

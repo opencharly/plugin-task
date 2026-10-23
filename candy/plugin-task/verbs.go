@@ -174,11 +174,8 @@ func resolveUpstreamRef(projDir, url, ref string) (sha, which string) {
 	if ref == "" || url == "" {
 		return "", ""
 	}
-	if out, _, exit := hostCapture(context.Background(), projDir,
-		fmt.Sprintf("git ls-remote %s %s", shellQuote(url), shellQuote("refs/heads/"+ref))); exit == 0 {
-		if f := strings.Fields(strings.TrimSpace(out)); len(f) >= 1 {
-			return f[0], "branch"
-		}
+	if sha := remoteBranchSHA(projDir, url, ref); sha != "" {
+		return sha, "branch"
 	}
 	out, _, exit := hostCapture(context.Background(), projDir,
 		fmt.Sprintf("git ls-remote --tags %s %s", shellQuote(url), shellQuote(ref)))
@@ -203,6 +200,86 @@ func resolveUpstreamRef(projDir, url, ref string) (sha, which string) {
 		return peeled, "tag"
 	}
 	return tag, "tag"
+}
+
+// remoteBranchSHA asks `url` for the tip of `refs/heads/<branch>` — the value a LEAF
+// pin holds, read from the REMOTE and from nothing local.
+//
+// It is the ONE branch read in this file. `resolveUpstreamRef` (the CURRENCY question)
+// calls it, and so does the bump's index-only advance (opencharly/plugin-task#37), so
+// the two can never answer the same branch differently: a pin the currency report calls
+// `cur` and a pin the bump wrote are the same commit by construction.
+//
+// Empty means the remote does not serve that branch (or could not be reached) — the
+// loud case the caller reports, never "no information".
+func remoteBranchSHA(projDir, url, branch string) string {
+	if url == "" || branch == "" {
+		return ""
+	}
+	out, _, exit := hostCapture(context.Background(), projDir,
+		fmt.Sprintf("git ls-remote %s %s", shellQuote(url), shellQuote("refs/heads/"+branch)))
+	if exit != 0 {
+		return ""
+	}
+	f := strings.Fields(strings.TrimSpace(out))
+	if len(f) == 0 {
+		return ""
+	}
+	return f[0]
+}
+
+// resolveSubmoduleURL returns the URL a path's pin is read from: the url declared in
+// `.gitmodules`, with a RELATIVE url resolved against the SUPERPROJECT's own origin —
+// the same resolution git itself performs, because a relative submodule url means "a
+// sibling of this repo on the same remote".
+//
+// Empty means the url is missing, or is relative and the superproject has no origin to
+// resolve it against — the caller reports that rather than probing nothing.
+func resolveSubmoduleURL(projDir, path string) string {
+	u := submoduleURL(projDir, path)
+	if u == "" {
+		return ""
+	}
+	if !strings.HasPrefix(u, "./") && !strings.HasPrefix(u, "../") {
+		return u
+	}
+	out, _, exit := hostCapture(context.Background(), projDir, "git config --get remote.origin.url")
+	if exit != 0 {
+		return ""
+	}
+	return resolveRelativeURL(strings.TrimSpace(out), u)
+}
+
+// resolveRelativeURL resolves `rel` ("../sibling.git") against `base`
+// ("https://host/org/repo.git"), the way git resolves a relative submodule url.
+//
+// MEASURED against git itself (`git submodule init`, which writes the RESOLVED url into
+// .git/config): the superproject's url is treated as a DIRECTORY, and every ".." pops
+// one component of it. With base "file:///tmp/w/host/org/super.git": "../sibling.git"
+// resolves to "file:///tmp/w/host/org/sibling.git" (a SIBLING of the superproject),
+// "../../up.git" to "file:///tmp/w/host/up.git", and "./same.git" to
+// "file:///tmp/w/host/org/super.git/same.git" (INSIDE it).
+//
+// Empty when `base` is empty or the walk climbs above the root.
+func resolveRelativeURL(base, rel string) string {
+	if base == "" || rel == "" {
+		return ""
+	}
+	dir := base
+	for _, seg := range strings.Split(rel, "/") {
+		switch seg {
+		case "", ".":
+		case "..":
+			i := strings.LastIndex(dir, "/")
+			if i < 0 {
+				return ""
+			}
+			dir = dir[:i]
+		default:
+			dir += "/" + seg
+		}
+	}
+	return dir
 }
 
 // nestedGitmodulesGet reads `key` (e.g. `submodule.box/arch.branch`) from the `.gitmodules`
@@ -316,72 +393,21 @@ func submoduleGitlink(projDir, path, subpath string) string {
 	return strings.TrimSpace(out)
 }
 
-// runGitSubmodules maintains `.gitmodules` pins.
+// submoduleInitialized reports whether `path` has an INITIALIZED checkout - the presence
+// of the submodule's OWN .git and nothing else.
 //
-//	status — print PATH BRANCH PIN [DIRTY] for every submodule
-//	bump   — for pin_map entries, set the gitlink to pinned_from's twin; for the
-//	         rest, roll to their own default-branch HEAD; never a PR branch
-//	verify — assert every derived EDGE holds (each pin_map entry equals pinned_from's
-//	         twin at that path), then
-//	         audit every `.gitmodules` path's CHECKOUT: an initialized submodule
-//	         must be clean and its HEAD must equal its recorded gitlink, read
-//	         through submoduleAt's walk-up-safe form (charly#768). A mismatch is
-//	         reported with its DIRECTION and the command that repairs it
-//	         (gitlinkMismatchClass), because the recorded gitlink lives in this
-//	         repo's INDEX while the checkout belongs to another repo and a
-//	         `charly task sync` advance that was un-staged is not a broken pin
-//	         (opencharly/opencharly#461). The recorded
-//	         GITLINK is read for EVERY declared path, before the checkout is
-//	         classified (an index read needs no checkout), so a path declared with
-//	         no gitlink FAILS. An UNINITIALIZED path (declared, a gitlink, no
-//	         checkout) is CLASSIFIED and reported in the Message, never silently
-//	         skipped and never counted as a clean checkout.
-//
-// uninitializedSubmodules returns the submodule PATHS whose checkout is absent - the normal state of
-// a freshly created `git worktree` that has not run `git submodule update --init`.
-//
-// It performs NO git operation inside those directories, so it cannot trigger the walk-up hazard the
+// It performs NO git operation inside that directory, so it cannot trigger the walk-up hazard the
 // submoduleAt guard exists to prevent (charly#768); it decides purely on the presence of the
 // submodule's own .git, exactly as submoduleAt does before it refuses.
-func uninitializedSubmodules(projDir string, paths []string) []string {
-	var uninit []string
-	for _, p := range paths {
-		if _, statErr := os.Stat(filepath.Join(projDir, p, ".git")); statErr != nil {
-			uninit = append(uninit, p)
-		}
-	}
-	return uninit
-}
-
-// runGitSubmodules runs the verb and states the pre-flight's finding (charly#864).
 //
-// An uninitialized gitlink has no pin to advance, so it is NOT one of the per-path failures the walk
-// records and continues past (plugin-task#13) - it is a PRECONDITION: reported ONCE, with the command
-// that repairs it, instead of failing once per path. The run still FAILS LOUD (the invariant
-// TestGitSubmodules_BumpUninitializedFailsLoud pins, and the reason charly#768 exists): a sync over a
-// tree it could not fully advance must never report success, and must never touch the umbrella.
-// Pins that CAN advance still do, so one uninitialized sibling does not strand them.
-func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status, string) {
-	paths, err := submodulePaths(projDir)
-	if err != nil {
-		return spec.StatusFail, err.Error()
-	}
-	uninit := uninitializedSubmodules(projDir, paths)
-	status, msg := runGitSubmodulesInner(projDir, in, uninit)
-	// ONLY `bump` fails loud on it. `status` is DESIGNED to report an uninitialized gitlink as a
-	// marker and succeed - it has nothing to advance and is the mode an operator uses to SEE the
-	// state (TestGitSubmodules_StatusUninitializedMarker pins that) - and `verify` judges policy, not
-	// checkout availability. Narrowing this to the one mode whose intent is to advance pins is what
-	// keeps those two behaviours exactly as they were.
-	if in.Mode == "bump" && len(uninit) > 0 {
-		// Same VOCABULARY as the guard itself ("not an initialized checkout"), because that phrase is
-		// what every existing reader of this failure matches on - including the regression test that
-		// pins charly#768 - plus the two things it never said: HOW MANY, and which ones.
-		msg += fmt.Sprintf("; %d submodule(s) not an initialized checkout (%s): run `git submodule update --init`",
-			len(uninit), strings.Join(uninit, ", "))
-		return spec.StatusFail, msg
-	}
-	return status, msg
+// WHY this is the bump's BRANCH and not its PRECONDITION (opencharly/plugin-task#37): a path
+// with no checkout is not a broken pin. Its pin lives in the SUPERPROJECT's index, and the bump
+// advances it THERE (advancePinInIndex) - so a wave never has to materialize a repo to record
+// where that repo is pinned. A path WITH a checkout is MATERIALIZED, and the bump moves it, so
+// the checkout and the index keep agreeing.
+func submoduleInitialized(projDir, path string) bool {
+	_, statErr := os.Stat(filepath.Join(projDir, path, ".git"))
+	return statErr == nil
 }
 
 // pinKind is what a pin's declared intent RESOLVES to. `pinGraph` classifies it for EVERY
@@ -462,7 +488,39 @@ func (g pinGraph) edgeSources(paths []string) []edgeRef {
 	return out
 }
 
-func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit []string) (spec.Status, string) {
+// runGitSubmodules maintains `.gitmodules` pins.
+//
+//	status — print PATH BRANCH PIN [DIRTY] for every submodule
+//	bump   — for pin_map entries, set the gitlink to pinned_from's twin; for the
+//	         rest, roll to their own default-branch HEAD; never a PR branch
+//	         A path WITH a checkout is rolled IN THAT CHECKOUT; a path with NO
+//	         checkout is advanced IN THE INDEX (opencharly/plugin-task#37), so a
+//	         wave never has to materialize a repo to record where it is pinned.
+//	verify — assert every derived EDGE holds (each pin_map entry equals pinned_from's
+//	         twin at that path), then
+//	         audit every `.gitmodules` path's CHECKOUT: an initialized submodule
+//	         must be clean and its HEAD must equal its recorded gitlink, read
+//	         through submoduleAt's walk-up-safe form (charly#768). A mismatch is
+//	         reported with its DIRECTION and the command that repairs it
+//	         (gitlinkMismatchClass), because the recorded gitlink lives in this
+//	         repo's INDEX while the checkout belongs to another repo and a
+//	         `charly task sync` advance that was un-staged is not a broken pin
+//	         (opencharly/opencharly#461). The recorded
+//	         GITLINK is read for EVERY declared path, before the checkout is
+//	         classified (an index read needs no checkout), so a path declared with
+//	         no gitlink FAILS. An UNINITIALIZED path (declared, a gitlink, no
+//	         checkout) is CLASSIFIED and reported in the Message, never silently
+//	         skipped and never counted as a clean checkout.
+//
+// The pre-flight that once made `bump` fail loud on an uninitialized path is GONE
+// (opencharly/plugin-task#37): a path with no checkout is not a broken pin, it is a
+// path whose pin lives in the superproject's INDEX, and the bump advances it there.
+// The invariant charly#768 protects is untouched - no git operation ever runs inside a
+// directory that has no checkout of its own, so git's walk-up to the superproject
+// stays impossible - and the run still FAILS LOUD for every path it could NOT
+// advance, because a sync over a tree it could not fully advance must never report
+// success.
+func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status, string) {
 	paths, err := submodulePaths(projDir)
 	if err != nil {
 		return spec.StatusFail, err.Error()
@@ -471,18 +529,10 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 	for _, s := range in.Skip {
 		skipped[s] = true
 	}
-	// Pre-flight the uninitialized gitlinks into `skipped` for BUMP ONLY (charly#864), the mode whose
-	// intent is to advance pins: both bump phases already bypass anything in this map, so neither
-	// performs a git operation in a directory whose checkout is absent - the walk-up hazard
-	// charly#768 fixed stays closed - and the condition is reported once by the caller rather than
-	// once per path. Scoped to `bump` explicitly: `status` and `verify` do not consult `skipped` at
-	// all, and leaving them untouched is the point - `status` still reports the gitlink as a marker
-	// and `verify` still judges policy.
-	if in.Mode == "bump" {
-		for _, p := range uninit {
-			skipped[p] = true
-		}
-	}
+	// `skipped` holds only the operator's own list - the paths this run must not
+	// touch - and both bump phases honour it. The uninitialized paths used to be
+	// pre-flighted into it as well; they are advanced IN THE INDEX now, not skipped
+	// and not fatal (opencharly/plugin-task#37).
 
 	switch in.Mode {
 	case "status":
@@ -522,7 +572,7 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 		// momentarily held superproject `.git/index.lock` failing that path's `git add`
 		// — costs that ONE pin instead of every pin sorted after it. Every failure is
 		// reported together at the end, so the run's own output names all of them.
-		var done, pinned, failures []string
+		var done, pinned, inIndex, failures []string
 		// pinned_from may be an EXTERNAL checkout (`../src`) rather than one of this
 		// project's OWN submodules; only a pinned_from that IS one of `paths` is rolled
 		// by phase 1, so only that case can be judged "did not roll". An external
@@ -535,8 +585,28 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 				break
 			}
 		}
-		pinnedFromRolled := !pinnedFromIsPath
+		// pinnedFromState says WHY the source may not be used, when it may not. The two
+		// reasons are different facts and must not be reported as one: a source that did
+		// not roll has STALE gitlinks (the edge violation the load-bearing order exists
+		// to prevent), and a source with no checkout has UNREADABLE gitlinks (there is
+		// no tree to read them from). "external" is a source that is not one of this
+		// project's submodules at all: it is read as it stands, and neither reason
+		// applies.
+		pinnedFromState := "external"
+		if pinnedFromIsPath {
+			pinnedFromState = "not-rolled"
+		}
 		// Phase 1: every submodule NOT named in pin_map rolls to its default-branch HEAD.
+		//
+		// A MATERIALIZED path is ROLLED: its checkout is switched to the branch tip and
+		// the move is staged. A path with NO checkout is advanced IN THE INDEX: the
+		// branch tip is read from the REMOTE (remoteBranchSHA) and recorded with
+		// `git update-index --add --cacheinfo 160000,<sha>,<path>` (advancePinInIndex)
+		// — the pin IS the index entry, so a wave never has to materialize a repo to
+		// record where that repo is pinned (opencharly/plugin-task#37). The checkout,
+		// when one is later materialized, is brought to that pin by
+		// `git submodule update --init <path>`, which is why the order after a wave is
+		// sync -> init -> verify.
 		for _, p := range paths {
 			if skipped[p] {
 				continue
@@ -546,6 +616,36 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 			}
 			branch := submoduleBranch(projDir, p)
 			if branch == "" {
+				// A path with no `branch=` declares no ref, so there is nothing to
+				// advance it to. The CURRENCY report is where that is named
+				// ("no intent and no `branch=`"), and it is a property of the
+				// DECLARATION, not of the checkout.
+				continue
+			}
+			if !submoduleInitialized(projDir, p) {
+				// UNMATERIALIZED: the pin moves in the index, and only there.
+				url := resolveSubmoduleURL(projDir, p)
+				if url == "" {
+					failures = append(failures, fmt.Sprintf(
+						"no url for %q in .gitmodules, so its pin cannot be read from the remote", p))
+					continue
+				}
+				sha := remoteBranchSHA(projDir, url, branch)
+				if sha == "" {
+					failures = append(failures, fmt.Sprintf(
+						"the remote for %q does not serve refs/heads/%s, so its pin cannot be advanced", p, branch))
+					continue
+				}
+				if st, msg := advancePinInIndex(projDir, p, sha); st != spec.StatusPass {
+					failures = append(failures, msg)
+					continue
+				}
+				inIndex = append(inIndex, p)
+				if p == in.PinnedFrom {
+					// The source's own pin advanced, but its TREE cannot be read: an
+					// unmaterialized source has no checkout to read a twin from.
+					pinnedFromState = "unmaterialized"
+				}
 				continue
 			}
 			if st, msg := pinSubmodule(projDir, p, "origin/"+branch); st != spec.StatusPass {
@@ -553,7 +653,7 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 				continue
 			}
 			if p == in.PinnedFrom {
-				pinnedFromRolled = true
+				pinnedFromState = "rolled"
 			}
 			done = append(done, p)
 		}
@@ -564,11 +664,21 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 		// OLD ones, and pinning a pin_map entry from them is exactly the EDGE
 		// violation the load-bearing order above exists to prevent. The refusal is
 		// REPORTED, never silent.
-		if !pinnedFromRolled {
+		//
+		// A pinned_from with NO CHECKOUT is refused for the other reason: its gitlinks
+		// are not stale, they are UNREADABLE — the twin an edge holds lives in the
+		// source's tree, and a source with no checkout has no tree to read it from. The
+		// remedy is named, because it is one command.
+		switch pinnedFromState {
+		case "not-rolled":
 			failures = append(failures, fmt.Sprintf(
 				"refused to pin %d pin_map entr(y|ies): pinned_from %q did not roll, so its gitlinks are stale and pinning from them would violate the edge the caller declared",
 				len(in.PinMap), in.PinnedFrom))
-		} else {
+		case "unmaterialized":
+			failures = append(failures, fmt.Sprintf(
+				"refused to pin %d pin_map entr(y|ies): pinned_from %q has no checkout, so its twin gitlinks cannot be read — materialize it with `git submodule update --init %s`",
+				len(in.PinMap), in.PinnedFrom, in.PinnedFrom))
+		default:
 			for upath, cpath := range in.PinMap {
 				if skipped[upath] {
 					continue
@@ -578,7 +688,15 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 					failures = append(failures, fmt.Sprintf("no gitlink for %q in %q", cpath, in.PinnedFrom))
 					continue
 				}
-				if st, msg := pinSubmodule(projDir, upath, sha); st != spec.StatusPass {
+				if !submoduleInitialized(projDir, upath) {
+					// UNMATERIALIZED edge: the pin moves in the index, to the twin
+					// the source's CURRENT tree records.
+					if st, msg := advancePinInIndex(projDir, upath, sha); st != spec.StatusPass {
+						failures = append(failures, msg)
+						continue
+					}
+					inIndex = append(inIndex, upath)
+				} else if st, msg := pinSubmodule(projDir, upath, sha); st != spec.StatusPass {
 					failures = append(failures, msg)
 					continue
 				}
@@ -587,17 +705,18 @@ func runGitSubmodulesInner(projDir string, in params.GitSubmodulesInput, uninit 
 		}
 		sort.Strings(done)
 		sort.Strings(pinned)
+		sort.Strings(inIndex)
 		sort.Strings(failures)
 		// FAILURES FIRST, deliberately: the failure list is the actionable part of this message, and the
 		// rolled/pinned name lists are long enough (422 names on a full umbrella) that appending the
 		// diagnostic after them is how it gets truncated away before a reader sees it. A message that
 		// reports what went wrong must lead with it.
 		if len(failures) > 0 {
-			return spec.StatusFail, fmt.Sprintf("%d pin(s) FAILED: %s; rolled %d submodule(s) to their default-branch HEAD; pinned %d pin_map entr(y|ies): %s",
-				len(failures), strings.Join(failures, "; "), len(done), len(pinned), strings.Join(pinned, ", "))
+			return spec.StatusFail, fmt.Sprintf("%d pin(s) FAILED: %s; rolled %d submodule(s) to their default-branch HEAD; advanced %d pin(s) in the index; pinned %d pin_map entr(y|ies): %s",
+				len(failures), strings.Join(failures, "; "), len(done), len(inIndex), len(pinned), strings.Join(pinned, ", "))
 		}
-		return spec.StatusPass, fmt.Sprintf("pinned %d pin_map entr(y|ies) (%s) after rolling %d submodule(s) to their default-branch HEAD",
-			len(pinned), strings.Join(pinned, ", "), len(done))
+		return spec.StatusPass, fmt.Sprintf("pinned %d pin_map entr(y|ies) (%s) after rolling %d submodule(s) to their default-branch HEAD and advancing %d pin(s) in the index",
+			len(pinned), strings.Join(pinned, ", "), len(done), len(inIndex))
 
 	case "verify":
 		// Half 1 — the derived EDGE: every pin_map entry must equal pinned_from's twin.
@@ -1143,6 +1262,35 @@ func pinSubmodule(projDir, path, ref string) (spec.Status, string) {
 	// worse than a bump that refuses.
 	if st, msg := reconcileNestedCheckouts(projDir, path); st != spec.StatusPass {
 		return st, msg
+	}
+	return spec.StatusPass, ""
+}
+
+// advancePinInIndex records `path`'s pin as `sha` in the SUPERPROJECT's index.
+//
+// THE PIN IS THE INDEX ENTRY. `verify` reads a path's pin from the index
+// (`git ls-files -s`), the currency report reads it from the index, and the umbrella's
+// whole pin contract is written about that entry — so advancing a pin does not NEED a
+// checkout (opencharly/plugin-task#37). `git update-index --add --cacheinfo
+// 160000,<sha>,<path>` writes that entry directly, and the checkout, when one is
+// materialized later, is brought to it by `git submodule update --init <path>`.
+//
+// `--add` is required: a path can be declared in `.gitmodules` with no index entry
+// yet, and a pin that could not be recorded is a pin that was never advanced. Mode
+// 160000 is the gitlink mode — the same one `git submodule add` writes.
+//
+// No git operation runs inside `path` itself, so the walk-up hazard charly#768 closed
+// stays closed: this is the superproject's index, read and written from the
+// superproject's own directory.
+func advancePinInIndex(projDir, path, sha string) (spec.Status, string) {
+	if sha == "" {
+		return spec.StatusFail, fmt.Sprintf("no sha to record for %q", path)
+	}
+	_, stderr, exit := hostCapture(context.Background(), projDir,
+		fmt.Sprintf("git update-index --add --cacheinfo %s", shellQuote("160000,"+sha+","+path)))
+	if exit != 0 {
+		return spec.StatusFail, fmt.Sprintf("record the pin for %s in the index failed: %s",
+			path, strings.TrimSpace(stderr))
 	}
 	return spec.StatusPass, ""
 }
