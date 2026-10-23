@@ -926,6 +926,106 @@ func TestGitSubmodules_BumpRefusesStalePinnedFrom(t *testing.T) {
 	}
 }
 
+// TestGitSubmodules_BumpNamesTheUnmaterializedSourceWithoutBranch proves the THIRD
+// shape of the source classification, the one the wave-3 state machine left
+// unclassified: a pinned_from that has NO CHECKOUT and declares NO `branch=`.
+//
+// The refusal must be the MISSING-CHECKOUT one — the source has no tree to read a
+// twin from, and the remedy is one command — not the STALE one, which blames
+// gitlinks that were never there (opencharly/plugin-task#39). Before the fix the
+// source was classified by the ROLL, so a source that never rolls because it
+// declares no ref was reported as a stale one.
+func TestGitSubmodules_BumpNamesTheUnmaterializedSourceWithoutBranch(t *testing.T) {
+	base := t.TempDir()
+
+	// A source repo with one commit: the umbrella DECLARES it, and the declaration
+	// carries a url but NO `branch=`.
+	src := filepath.Join(base, "src")
+	gitIn(t, base, "init", "-q", "-b", "main", "src")
+	writeFile(t, filepath.Join(src, "s"), "s")
+	gitIn(t, src, "add", "-A")
+	gitIn(t, src, "commit", "-qm", "s")
+	srcTip := gitIn(t, src, "rev-parse", "HEAD")
+	srcBare := filepath.Join(base, "src.git")
+	gitIn(t, base, "clone", "-q", "--bare", src, srcBare)
+
+	// A second leaf, for the `target` the pin_map entry points at.
+	leaf := filepath.Join(base, "leaf")
+	gitIn(t, base, "init", "-q", "-b", "main", "leaf")
+	writeFile(t, filepath.Join(leaf, "f"), "L1")
+	gitIn(t, leaf, "add", "-A")
+	gitIn(t, leaf, "commit", "-qm", "L1")
+	leafTip := gitIn(t, leaf, "rev-parse", "HEAD")
+	leafBare := filepath.Join(base, "leaf.git")
+	gitIn(t, base, "clone", "-q", "--bare", leaf, leafBare)
+
+	// The umbrella declares `src` WITHOUT a `branch=` and `target` WITH one. NEITHER
+	// is initialized: both are empty directories (the exact post-`git worktree add`
+	// state of a light tree).
+	umb := filepath.Join(base, "umb")
+	gitIn(t, base, "init", "-q", "-b", "main", "umb")
+	writeFile(t, filepath.Join(umb, "u"), "u")
+	gitIn(t, umb, "add", "-A")
+	gitIn(t, umb, "commit", "-qm", "u")
+	writeFile(t, filepath.Join(umb, ".gitmodules"),
+		"[submodule \"src\"]\n\tpath = src\n\turl = "+srcBare+"\n"+
+			"[submodule \"target\"]\n\tpath = target\n\turl = "+leafBare+"\n\tbranch = main\n")
+	gitIn(t, umb, "add", ".gitmodules")
+	gitIn(t, umb, "commit", "-qm", "gitmodules")
+	gitIn(t, umb, "update-index", "--add", "--cacheinfo", "160000,"+srcTip+",src")
+	gitIn(t, umb, "update-index", "--add", "--cacheinfo", "160000,"+leafTip+",target")
+	gitIn(t, umb, "commit", "-qm", "staged gitlinks")
+	for _, d := range []string{"src", "target"} {
+		if err := os.MkdirAll(filepath.Join(umb, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(umb, d, ".git")); err == nil {
+			t.Fatalf("fixture precondition: %q must have no .git", d)
+		}
+	}
+	// Give the UMBRELLA an `origin` with an `origin/main` ref, so a walk-up from an
+	// uninitialized directory would GENUINELY detach the umbrella (the charly#768
+	// regression) rather than error out.
+	umbOrigin := filepath.Join(base, "umb-origin.git")
+	gitIn(t, base, "clone", "-q", "--bare", umb, umbOrigin)
+	gitIn(t, umb, "remote", "add", "origin", umbOrigin)
+	gitIn(t, umb, "fetch", "-q", "origin")
+	gitIn(t, umb, "branch", "--set-upstream-to=origin/main", "main")
+
+	umbHeadBefore := gitIn(t, umb, "rev-parse", "HEAD")
+	umbBranchBefore := gitIn(t, umb, "rev-parse", "--abbrev-ref", "HEAD")
+
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{
+		"mode": "bump", "pinned_from": "src", "pin_map": map[string]any{"target": "inner"},
+	})
+	if st != spec.StatusFail {
+		t.Fatalf("a bump whose pinned_from has no checkout must FAIL, got %s: %s", st, msg)
+	}
+	// THE ASSERTION: the refusal names the MISSING CHECKOUT and the command that
+	// materializes it.
+	if !strings.Contains(msg, "has no checkout") {
+		t.Fatalf("the refusal must name the missing checkout, got: %s", msg)
+	}
+	if !strings.Contains(msg, "git submodule update --init src") {
+		t.Fatalf("the refusal must name the command that materializes the source, got: %s", msg)
+	}
+	// AND NOT the stale diagnosis: there are no gitlinks to be stale.
+	if strings.Contains(msg, "did not roll") {
+		t.Fatalf("the refusal must not blame stale gitlinks on a source with no tree, got: %s", msg)
+	}
+	// The edge target is UNTOUCHED — it was never pinned from an unreadable source.
+	if got := gitlink(umb, "target"); got != leafTip {
+		t.Fatalf("target pinned from an UNREADABLE pinned_from: gitlink=%s want the unchanged %s", got, leafTip)
+	}
+	// The umbrella is EXACTLY where it was: no walk-up, no detach.
+	if got := gitIn(t, umb, "rev-parse", "HEAD"); got != umbHeadBefore {
+		t.Fatalf("umbrella HEAD moved: %s -> %s", umbHeadBefore, got)
+	}
+	if got := gitIn(t, umb, "rev-parse", "--abbrev-ref", "HEAD"); got != umbBranchBefore {
+		t.Fatalf("umbrella branch changed: %q -> %q (the walk-up detach regression)", umbBranchBefore, got)
+	}
+}
+
 // TestGitSubmodules_BumpExternalPinnedFrom is the boundary guard for the refusal above:
 // a pinned_from that is NOT one of this project's own submodules — the `../src` shape
 // scripts/gate-task.sh's pins-bump fixture exercises, and the shape the umbrella's own

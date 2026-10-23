@@ -592,9 +592,19 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		// no tree to read them from). "external" is a source that is not one of this
 		// project's submodules at all: it is read as it stands, and neither reason
 		// applies.
+		//
+		// The CHECKOUT decides which of the two reasons applies, and it is read FIRST
+		// (opencharly/plugin-task#39): a source with no checkout cannot be rolled, so
+		// its gitlinks are never "stale" - they are unreadable, whatever its `branch=`
+		// says and whatever the advance did. Classifying it by the roll instead left
+		// the no-`branch=` shape - which leaves phase 1 before the roll - reported as
+		// a stale source, blaming gitlinks that do not exist and naming no remedy.
 		pinnedFromState := "external"
 		if pinnedFromIsPath {
 			pinnedFromState = "not-rolled"
+			if !submoduleInitialized(projDir, in.PinnedFrom) {
+				pinnedFromState = "unmaterialized"
+			}
 		}
 		// Phase 1: every submodule NOT named in pin_map rolls to its default-branch HEAD.
 		//
@@ -620,6 +630,13 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 				// advance it to. The CURRENCY report is where that is named
 				// ("no intent and no `branch=`"), and it is a property of the
 				// DECLARATION, not of the checkout.
+				//
+				// For the PINNED_FROM source this early exit used to leave the
+				// diagnosis wrong: the source's state was classified by the ROLL,
+				// and a source that never rolls because it declares no ref was
+				// reported as a stale one. The state is classified by the CHECKOUT
+				// above, so the source is already named for what it is here
+				// (opencharly/plugin-task#39).
 				continue
 			}
 			if !submoduleInitialized(projDir, p) {
@@ -641,11 +658,10 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 					continue
 				}
 				inIndex = append(inIndex, p)
-				if p == in.PinnedFrom {
-					// The source's own pin advanced, but its TREE cannot be read: an
-					// unmaterialized source has no checkout to read a twin from.
-					pinnedFromState = "unmaterialized"
-				}
+				// A source whose own pin advanced here still has no TREE to read a
+				// twin from - an unmaterialized source has no checkout at all - and
+				// the state already says so: it is classified by the CHECKOUT
+				// before phase 1 (opencharly/plugin-task#39).
 				continue
 			}
 			if st, msg := pinSubmodule(projDir, p, "origin/"+branch); st != spec.StatusPass {

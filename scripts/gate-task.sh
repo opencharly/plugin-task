@@ -432,6 +432,47 @@ if echo "$status_out" | grep -q "$umb_short"; then
 fi
 echo "   status reported '- (uninitialized)'; umbrella HEAD ($umb_short) not leaked as a pin"
 
+echo "== verb:git-submodules bump (pinned_from with NO CHECKOUT and no 'branch=' -> the refusal names the missing checkout) =="
+# opencharly/plugin-task#39: the source's state is classified by the CHECKOUT, not by
+# the ROLL. A source that has no checkout AND declares no `branch=` leaves phase 1
+# before the roll, so the roll-based classification reported it as a STALE source and
+# blamed gitlinks that were never there. The refusal must name the missing checkout
+# and the ONE command that materializes it.
+. "$FIX/shas"
+NOSRC="$WORK/nosrc"; mkdir -p "$NOSRC"
+(
+  cd "$NOSRC" && git init -q -b main
+  echo u > u.txt && git add -A && G commit -qm u
+  printf '[submodule "src"]\n\tpath = src\n\turl = %s\n[submodule "target"]\n\tpath = target\n\turl = %s\n\tbranch = main\n' "$FIX/subsrc" "$FIX/subsrc" > .gitmodules
+  git add .gitmodules && G commit -qm gm
+  git update-index --add --cacheinfo "160000,$C1,src" && G commit -qm pin-src
+  git update-index --add --cacheinfo "160000,$C1,target" && G commit -qm pin-target
+  mkdir -p src target   # present-but-UNINITIALIZED, and `src` declares NO `branch=`
+)
+cat > "$NOSRC/charly.yml" <<'YML'
+bump-from-source:
+  task:
+    description: bump the pin_map entry from a source that has no checkout
+    dir: .
+    plan:
+      - run: bump
+        git-submodules: {mode: bump, pinned_from: src, pin_map: {target: inner}}
+        context: [deploy]
+YML
+if nosrc_out="$(cd "$NOSRC" && "$CH" task bump-from-source 2>&1)"; then
+  echo "FAIL: a bump whose pinned_from has no checkout must FAIL" >&2
+  printf '%s\n' "$nosrc_out" >&2; exit 1
+fi
+printf '%s\n' "$nosrc_out" | sed 's/^/   | /'
+printf '%s\n' "$nosrc_out" | grep -q 'has no checkout' || {
+  echo "FAIL: the refusal must name the missing checkout" >&2; printf '%s\n' "$nosrc_out" >&2; exit 1; }
+printf '%s\n' "$nosrc_out" | grep -q 'git submodule update --init src' || {
+  echo "FAIL: the refusal must name the command that materializes the source" >&2; printf '%s\n' "$nosrc_out" >&2; exit 1; }
+if printf '%s\n' "$nosrc_out" | grep -q 'did not roll'; then
+  echo "FAIL: the refusal must not blame stale gitlinks on a source with no tree" >&2; printf '%s\n' "$nosrc_out" >&2; exit 1
+fi
+echo "   the refusal named the missing checkout and the materialize command; the stale diagnosis is gone"
+
 echo "== verb:git-submodules bump ORDER (pinned_from is itself rolled first) =="
 . "$FIX/order"; . "$FIX/leafshas"
 (cd "$FIX/umb2" && "$CH" task order-bump) | grep -q '0 failed' || { echo "FAIL: order-bump did not run" >&2; exit 1; }
