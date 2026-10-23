@@ -331,27 +331,78 @@ func invokeOpRun(ctx context.Context, req *pb.InvokeRequest) (*pb.InvokeReply, e
 			cli[k] = v
 		}
 	}
-	order, cerr := workflowkit.Closure(ts.tasks, []string{in.Task})
+	st, msg := hopTasks(ctx, ex, ts, in.Task, cli)
+	return verbResult(st, msg)
+}
+
+// hopTasks is the `task:` hop: it runs the requested task and its dependencies (the
+// dependency-first closure) and returns the verdict the hop reports.
+//
+// It is a named function so the REAL hop is what a test drives. The plugin-task#12
+// lesson is exact: a test that exercised a helper BESIDE the call site passed even
+// after the call site regressed to the bare aggregate, so the hop's own composition
+// lives here — and is driven here.
+func hopTasks(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, cli map[string]string) (spec.Status, string) {
+	order, cerr := workflowkit.Closure(ts.tasks, []string{name})
 	if cerr != nil {
-		return verbResult(spec.StatusFail, cerr.Error())
+		return spec.StatusFail, cerr.Error()
 	}
 	ran, failed := 0, 0
+	var steps []spec.StepResult
 	for _, n := range order {
 		resolved, perr := workflowkit.ResolveArgs(ts.tasks[n], cli)
 		if perr != nil {
-			return verbResult(spec.StatusFail, fmt.Sprintf("task %q: %v", n, perr))
+			return spec.StatusFail, fmt.Sprintf("task %q: %v", n, perr)
 		}
 		r, rerr := runTask(ctx, ex, ts, n, resolved, false, false)
 		if rerr != nil {
-			return verbResult(spec.StatusFail, rerr.Error())
+			return spec.StatusFail, rerr.Error()
 		}
 		ran++
 		failed += r.Failed
+		steps = append(steps, r.Steps...)
 		if st, msg := nestedVerdict(n, r); st != spec.StatusPass {
-			return verbResult(st, msg)
+			return st, msg
 		}
 	}
-	return verbResult(spec.StatusPass, fmt.Sprintf("ran %d task(s), %d step(s) failed", ran, failed))
+	return spec.StatusPass, hopSummary(ran, failed, steps)
+}
+
+// hopSummary composes the `task:` hop's SUCCESS message.
+//
+// The hop is where a nested run's EVIDENCE was destroyed: the verb returned the
+// aggregate "ran N task(s), M step(s) failed", so a caller that composed a verb
+// through `task:` could see that it passed but never WHAT it reported — the wrapped
+// verb's counts, its per-pin states, its producer-first leg order. The pass/fail
+// survived; the coverage did not (opencharly/plugin-task#33).
+//
+// The step messages ARE that evidence: kit.RunPlan puts each step's own message on
+// its StepResult, and the top-level reporter prints them for a DIRECT run — so the
+// hop must carry them for a NESTED one, or the nested run says nothing at all. The
+// FAILURE path is unchanged and stays selective (nestedFailureMessage names only
+// what failed, so a passing step never bloats a failure verdict).
+//
+// One message → that message, verbatim. Several → the non-empty ones joined, in plan
+// order. None → the aggregate, because a task with no steps has no evidence to carry
+// and the count is all there is. A walk that ended with failures (a continue_on_error
+// task failed a step and the hop kept walking) keeps the aggregate as the PREFIX, so
+// the count of what failed is never lost.
+func hopSummary(ran, failed int, steps []spec.StepResult) string {
+	summary := fmt.Sprintf("ran %d task(s), %d step(s) failed", ran, failed)
+	var msgs []string
+	for _, s := range steps {
+		if m := strings.TrimRight(s.Result.Message, "\n"); m != "" {
+			msgs = append(msgs, m)
+		}
+	}
+	switch {
+	case len(msgs) == 0:
+		return summary
+	case failed > 0:
+		return summary + "\n" + strings.Join(msgs, "\n")
+	default:
+		return strings.Join(msgs, "\n")
+	}
 }
 
 // nestedVerdict decides ONE task's verdict as it crosses the `task:` hop. It is the
