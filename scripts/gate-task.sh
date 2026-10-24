@@ -100,6 +100,23 @@ composite:
         task:
           task: leafreason
         context: [deploy]
+skipped-step:
+  task:
+    description: a task with a step that RAN NOTHING
+    plan:
+      - run: this step ran nothing
+        skip: true
+        command: "echo should-not-run"
+silent-skip:
+  task:
+    description: a SILENT task with a step that ran nothing
+    silent: true
+    plan:
+      - run: the silent step that ran nothing
+        skip: true
+        command: "echo should-not-run"
+      - run: the silent step that ran
+        command: "echo ran-quietly"
 YML
 cd "$PROJ"
 
@@ -109,6 +126,49 @@ greet_out="$("$CH" task greet)"; echo "$greet_out" | grep -q '0 failed' || { ech
 if "$CH" task failtask; then echo "FAIL: a failing task must exit non-zero" >&2; exit 1; fi
 json="$("$CH" task failtask --json 2>&1 || true)"
 echo "$json" | grep -q '"failed": 1' || { echo "FAIL: --json report missing the tally" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# 1a) The THIRD BUCKET: a step that RAN NOTHING is counted and disclosed
+# (opencharly/plugin-task#35). The summary used to count steps and failures only,
+# so a skipped step was rounded into "step" and the line read "N step(s), 0 failed"
+# over a run in which part of it never happened — a green that never ran. The bucket
+# is proved LIVE here, on a real charly binary, because the unit tests cannot show
+# the reporter's output as a reader sees it.
+# ---------------------------------------------------------------------------
+echo "== a step that ran nothing is counted in its own bucket =="
+if ! skip_out="$("$CH" task skipped-step 2>&1)"; then
+  echo "FAIL: a task whose only step ran nothing must exit 0 (a skip is not a failure)" >&2
+  printf '%s\n' "$skip_out" >&2; exit 1
+fi
+echo "$skip_out" | grep -q 'task skipped-step: 1 step(s), 0 failed, 1 skipped' || {
+  echo "FAIL: the summary must count the step that ran nothing in its own bucket (plugin-task#35)" >&2
+  printf '%s\n' "$skip_out" >&2; exit 1; }
+if echo "$skip_out" | grep -q 'should-not-run'; then
+  echo "FAIL: a skipped step must not run its command" >&2
+  printf '%s\n' "$skip_out" >&2; exit 1
+fi
+printf '%s\n' "$skip_out" | sed 's/^/   | /'
+echo "   a step that ran nothing is counted, disclosed, and non-fatal"
+
+# The SILENT path keeps its meaning (no per-step output) while a skipped step still
+# leaves a trace: a silent task that hid the skip would report a count with no cause.
+echo "== a SILENT task still discloses the step that ran nothing =="
+if ! silent_out="$("$CH" task silent-skip 2>&1)"; then
+  echo "FAIL: a silent task whose step ran nothing must exit 0" >&2
+  printf '%s\n' "$silent_out" >&2; exit 1
+fi
+echo "$silent_out" | grep -q '0 failed, 1 skipped' || {
+  echo "FAIL: the silent summary must still carry the skipped count (plugin-task#35)" >&2
+  printf '%s\n' "$silent_out" >&2; exit 1; }
+echo "$silent_out" | grep -q 'skip: true' || {
+  echo "FAIL: the silent path must still disclose WHY the step did not run (plugin-task#35)" >&2
+  printf '%s\n' "$silent_out" >&2; exit 1; }
+if echo "$silent_out" | grep -q 'ran-quietly'; then
+  echo "FAIL: the silent path must keep suppressing the steps that ran" >&2
+  printf '%s\n' "$silent_out" >&2; exit 1
+fi
+printf '%s\n' "$silent_out" | sed 's/^/   | /'
+echo "   the silent path keeps its meaning and still discloses the skip"
 
 # ---------------------------------------------------------------------------
 # 1b) The nested `task:` hop carries a failing step's OWN message (plugin-task#12).
@@ -346,7 +406,7 @@ verify_out="$("$CH" task pins-verify)"; echo "$verify_out" | grep -q '0 failed' 
 
 # --- The nested `task:` hop carries a PASSING nested run's OWN report
 # (opencharly/plugin-task#33). The hop used to answer with the bare aggregate
-# "ran N task(s), M step(s) failed", so a caller that composed a verb through
+# "ran N task(s), M step(s) failed, K skipped", so a caller that composed a verb through
 # `task:` could see that it PASSED but never WHAT it reported — the pin counts, the
 # per-pin states, the producer-first leg order. The pass/fail survived; the coverage
 # did not. This arm proves the report crosses the hop LIVE, on a real pin verb: the
@@ -358,7 +418,7 @@ if ! echo "$nested_out" | grep -q 'policy pin(s) hold across'; then
   echo "FAIL: the composite dropped the nested run's own report across the task: hop (plugin-task#33)" >&2
   printf '%s\n' "$nested_out" >&2; exit 1
 fi
-if echo "$nested_out" | grep -q 'ran 1 task(s), 0 step(s) failed'; then
+if echo "$nested_out" | grep -q 'ran 1 task(s), 0 step(s) failed, 0 skipped'; then
   echo "FAIL: the bare aggregate must not be the hop's whole answer (plugin-task#33)" >&2
   printf '%s\n' "$nested_out" >&2; exit 1
 fi

@@ -67,9 +67,18 @@ func loadTaskSet(ctx context.Context, ex *sdk.Executor) (*taskSet, error) {
 
 // runResult is the outcome of one task invocation.
 type runResult struct {
-	Name    string
-	Steps   []spec.StepResult
+	Name  string
+	Steps []spec.StepResult
+	// Failed counts the steps that FAILED; Skipped counts the steps that RAN
+	// NOTHING — the plan runner's StatusSkip (sdk/kit/planrun.go: a step with
+	// `skip: true`, a step excluded on a distro, a context skip, a step whose
+	// variables could not be resolved, a step whose verb is unknown).
+	//
+	// The third bucket exists because a skip is neither a pass nor a failure: it
+	// proved nothing and disproved nothing. Rounded into "step" it read as a
+	// green that never ran (opencharly/plugin-task#35).
 	Failed  int
+	Skipped int
 	Status  string // "ran" | "up-to-date" | "skipped-platform" | "error"
 	Message string
 	// ContinueOnError / Silent are carried from the task so the CLI decides the
@@ -181,8 +190,13 @@ func runTask(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, pa
 		}
 	}
 	for _, s := range steps {
-		if s.Result.Status == spec.StatusFail {
+		switch s.Result.Status {
+		case spec.StatusFail:
 			res.Failed++
+		case spec.StatusSkip:
+			// The step RAN NOTHING: not a failure, not a pass. It gets its own
+			// bucket so the summary can say so out loud.
+			res.Skipped++
 		}
 	}
 	res.Status = "ran"
