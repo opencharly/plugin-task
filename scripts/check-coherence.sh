@@ -8,7 +8,8 @@
 # are older RAISES sdk/spec past the APIs charly's OTHER compiled-in plugins were built
 # against, and the build dies fifty errors deep in plugin-box / plugin-build /
 # plugin-cmd with errors that name neither this repo nor the cause. Measured at charly
-# v2026.267.2313 (pinning sdk v0.2026266.1111 against this module's v0.2026276.1822):
+# v2026.267.2313 (pinning sdk v0.2026266.1111 against a module pinning sdk
+# v0.2026276.1822 — the pin this module carried at the time of that measurement):
 # 50 such errors, and the gate never reached a single verb assertion (plugin-task#14).
 #
 # The ordering below is the invariant that makes the build coherent, and asserting it
