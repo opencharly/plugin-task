@@ -48,6 +48,13 @@ when one is authored, add it here.
 - `cd candy/plugin-task && go test ./...` — the dependency closure, CLI parsing,
   validation, and incremental-semantics tests.
 - `cd candy/plugin-task && gofmt -l .` — formatting (empty output passes).
+- `cd candy/plugin-task && go vet ./...` — the vet pass.
+- `cd candy/plugin-task && GOTOOLCHAIN=go$(go list -m -f '{{.GoVersion}}') golangci-lint run`
+  — the linter, under the toolchain this module's `go.mod` declares: golangci-lint
+  cannot read the export data of a newer GOROOT, so the toolchain must be the
+  module's own, and the linter's version is the one CI pins in
+  `.github/workflows/ci.yml` (one source of truth — read it there). The local gate
+  runs what CI's `go` job runs, so a finding CI would raise is raised locally first.
 - `charly box validate` at the repo root — the structural check (the candy +
   `plugin:` block, CUE schema).
 - `scripts/gate-task.sh` at the repo root — the live gate: it clones charly at

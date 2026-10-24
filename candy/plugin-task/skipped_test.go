@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
-	"os"
 	"strings"
 	"testing"
 
@@ -153,31 +151,22 @@ func TestPrintResultsJSON_CarriesTheSkippedCount(t *testing.T) {
 		Skipped: 1,
 		Steps:   []spec.StepResult{{Keyword: "run", Text: "the step that ran nothing", Result: spec.CheckResult{Status: spec.StatusSkip}}},
 	}}
-	oldOut := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = w
-	jerr := printResultsJSON(results)
-	_ = w.Close()
-	os.Stdout = oldOut
+	var jerr error
+	out, _ := captureStreams(t, func() {
+		jerr = printResultsJSON(results)
+	})
 	if jerr != nil {
 		t.Fatalf("printResultsJSON: %v", jerr)
-	}
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(r); err != nil {
-		t.Fatal(err)
 	}
 	var decoded []struct {
 		Failed  int `json:"failed"`
 		Skipped int `json:"skipped"`
 	}
-	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
-		t.Fatalf("the JSON report must decode: %v (%s)", err, buf.String())
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("the JSON report must decode: %v (%s)", err, out)
 	}
 	if len(decoded) != 1 || decoded[0].Skipped != 1 {
-		t.Fatalf("the JSON report must carry the skipped count, got %s", buf.String())
+		t.Fatalf("the JSON report must carry the skipped count, got %s", out)
 	}
 }
 
@@ -200,25 +189,17 @@ func TestRunTaskCLI_SkippedStepExitsZero(t *testing.T) {
 	}
 	defer func() { entityCache = oldCache }()
 
-	oldOut, oldErr := os.Stdout, os.Stderr
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	errW, _, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout, os.Stderr = outW, errW
-	runErr := runTaskCLI(context.Background(), nil, []string{"mixed"})
-	_ = outW.Close()
-	_ = errW.Close()
-	os.Stdout, os.Stderr = oldOut, oldErr
+	var runErr error
+	report, stderrReport := captureStreams(t, func() {
+		runErr = runTaskCLI(context.Background(), nil, []string{"mixed"})
+	})
 	if runErr != nil {
 		t.Fatalf("a task whose only step ran nothing must exit 0, got %v", runErr)
 	}
-	report, _ := io.ReadAll(outR)
-	if !strings.Contains(string(report), "0 failed, 1 skipped") {
+	if !strings.Contains(report, "0 failed, 1 skipped") {
 		t.Fatalf("the report must name the skipped count, got:\n%s", report)
+	}
+	if stderrReport != "" {
+		t.Fatalf("the report belongs on stdout, not stderr, got:\n%s", stderrReport)
 	}
 }

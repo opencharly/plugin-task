@@ -3,7 +3,6 @@ package task
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -396,23 +395,16 @@ func TestFormatStepLine_RendersStepMessage(t *testing.T) {
 // asserts the step message reaches it — the end-to-end arm the pure renderer test
 // cannot cover (a reporter that stopped calling the renderer would pass that one).
 func TestPrintResultText_EmitsStepMessage(t *testing.T) {
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = w
-	printResultText(outWriter(), &runResult{
-		Name: "map", Status: "ran",
-		Steps: []spec.StepResult{{
-			Keyword: "run", Text: "print the submodule map",
-			Result: spec.CheckResult{Status: spec.StatusPass, Message: "MAP-TABLE-MARKER"},
-		}},
+	out, _ := captureStreams(t, func() {
+		printResultText(outWriter(), &runResult{
+			Name: "map", Status: "ran",
+			Steps: []spec.StepResult{{
+				Keyword: "run", Text: "print the submodule map",
+				Result: spec.CheckResult{Status: spec.StatusPass, Message: "MAP-TABLE-MARKER"},
+			}},
+		})
 	})
-	_ = w.Close()
-	os.Stdout = old
-	out, _ := io.ReadAll(r)
-	if !strings.Contains(string(out), "MAP-TABLE-MARKER") {
+	if !strings.Contains(out, "MAP-TABLE-MARKER") {
 		t.Fatalf("printResultText must emit the step message, got:\n%s", out)
 	}
 }
