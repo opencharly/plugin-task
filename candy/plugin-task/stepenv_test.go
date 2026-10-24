@@ -159,17 +159,31 @@ func TestRunTask_StdinBytesAreNotExported(t *testing.T) {
 		_, _ = w.Write([]byte("piped-bytes"))
 		_ = w.Close()
 	}()
-	defer func() { os.Stdin = old }()
+	defer func() {
+		os.Stdin = old
+		_ = r.Close()
+	}()
 
-	env, _ := captureStepEnv(t, spec.Task{
+	task := spec.Task{
 		Description: "d",
 		Plan: []spec.Step{{Run: "x", Op: spec.Op{
 			Plugin:      "command",
 			PluginInput: map[string]any{"command": `printf %s "${TASK_STDIN}"`},
 		}}},
-	}, map[string]string{"kept": "a resolved value"})
+	}
+	runner, stdin := newTaskRunner(nil, t.TempDir(), task, map[string]string{"kept": "a resolved value"})
+	defer stdin.cleanup()
+
+	// The PRECONDITION, asserted: the capture RAN and read the piped bytes, so the
+	// task's own merged env carries them. Without this the ABSENCE asserted below
+	// would be satisfied by a capture that never happened — a vacuous pass, and the
+	// reason the assertion used to prove nothing (opencharly/plugin-task#48).
+	if v, ok := runner.EffectiveEnv()["TASK_STDIN"]; !ok || v != "piped-bytes" {
+		t.Fatalf("the capture must have run and read the piped bytes, got TASK_STDIN=%q (present=%v)", v, ok)
+	}
 
 	// The channel is ON — a resolved value is exported — while the stream is NOT.
+	env := runner.StepEnv()
 	if got := env["kept"]; got != "a resolved value" {
 		t.Fatalf("the data channel must export the resolved values, got kept=%q", got)
 	}
