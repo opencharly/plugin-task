@@ -2,8 +2,6 @@ package task
 
 import (
 	"context"
-	"io"
-	"os"
 	"strings"
 	"testing"
 
@@ -44,29 +42,17 @@ func TestRunTaskCLI_OutputMode(t *testing.T) {
 	}
 	defer func() { entityCache = oldCache }()
 
-	oldOut, oldErr := os.Stdout, os.Stderr
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	errR, errW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout, os.Stderr = outW, errW
-	runErr := runTaskCLI(context.Background(), nil, []string{"capture", "--output"})
-	_ = outW.Close()
-	_ = errW.Close()
-	os.Stdout, os.Stderr = oldOut, oldErr
+	var runErr error
+	stdout, stderr := captureStreams(t, func() {
+		runErr = runTaskCLI(context.Background(), nil, []string{"capture", "--output"})
+	})
 	if runErr != nil {
 		t.Fatalf("runTaskCLI --output: %v", runErr)
 	}
-	stdout, _ := io.ReadAll(outR)
-	stderr, _ := io.ReadAll(errR)
-	if string(stdout) != "CAPTURED-RAW-VALUE\n" {
+	if stdout != "CAPTURED-RAW-VALUE\n" {
 		t.Fatalf("stdout must carry ONLY the raw captured value + newline, got %q", stdout)
 	}
-	if !strings.Contains(string(stderr), "task capture:") {
+	if !strings.Contains(stderr, "task capture:") {
 		t.Fatalf("the human report must be on stderr, got %q", stderr)
 	}
 }
