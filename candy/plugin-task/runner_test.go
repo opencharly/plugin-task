@@ -31,6 +31,7 @@ func TestCaptureStdin_PipeExposesVars(t *testing.T) {
 	env := map[string]string{}
 	cap := captureStdin(env)
 	os.Stdin = old
+	_ = r.Close()
 
 	if v, ok := env["TASK_STDIN"]; !ok || v != "piped-input" {
 		t.Fatalf("TASK_STDIN must be defined with the piped bytes, got %q (present=%v)", v, ok)
@@ -62,6 +63,7 @@ func TestCaptureStdin_EmptyPipeStillDefinesVars(t *testing.T) {
 	env := map[string]string{}
 	cap := captureStdin(env)
 	os.Stdin = old
+	_ = r.Close()
 	defer cap.cleanup()
 
 	if v, ok := env["TASK_STDIN"]; !ok || v != "" {
@@ -92,6 +94,7 @@ func TestCaptureStdin_TruncatesAtBound(t *testing.T) {
 	env := map[string]string{}
 	cap := captureStdin(env)
 	os.Stdin = old
+	_ = r.Close()
 	defer cap.cleanup()
 
 	if !cap.truncated {
@@ -128,6 +131,7 @@ func TestRunTask_RecordsStdinTruncation(t *testing.T) {
 	}}
 	res, err := runTask(context.Background(), nil, ts, "t", nil, false, false)
 	os.Stdin = old
+	_ = r.Close()
 	if err != nil {
 		t.Fatalf("runTask: %v", err)
 	}
