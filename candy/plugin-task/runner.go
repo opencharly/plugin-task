@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"strings"
@@ -220,11 +221,32 @@ var verbResolverFor = func(ex *sdk.Executor) kit.VerbResolver {
 // vars + resolved params + env for ${VAR} expansion, plus the captured-stdin
 // exposure when stdin is a pipe.
 //
+// The same merged env is handed over as the DATA channel (kit.RunnerConfig.StepEnv):
+// the task's RESOLVED values reach the step's PROCESS ENVIRONMENT, so a value is
+// DATA and never shell SOURCE. See the clone below.
+//
 // It also returns the stdinCapture whose temp file the caller MUST remove once the
 // walk is done (runTask defers stdin.cleanup()).
 func newTaskRunner(ex *sdk.Executor, projDir string, t spec.Task, params map[string]string) (*kit.Runner, stdinCapture) {
 	env := workflowkit.MergedEnv(t, params)
 	env["TASK_DIR"] = workflowkit.ResolveTaskDir(projDir, t.Dir, env)
+	// The DATA channel — the task's RESOLVED values as the step's process environment.
+	//
+	// The TEXT channel (the expander) substitutes a value into a step's command TEXT, and
+	// the shell then PARSES that text, so a value that is DATA becomes SOURCE: a `$(…)`
+	// inside a value EXECUTES (opencharly/plugin-task#34). The environment is the other
+	// channel: a value delivered as an environment variable is DATA, because the shell
+	// never re-parses the result of an expansion. The command verb applies the step's
+	// env as a shell-QUOTED export, so the value arrives as one word whatever it
+	// contains.
+	//
+	// The map is CLONED here, BEFORE captureStdin mutates env: the piped bytes are a
+	// runtime STREAM, not a resolved value, and the command verb renders an exported
+	// value into the command TEXT — where a NUL byte (a piped binary stream carries
+	// one) would make the exec un-runnable ("fork/exec /usr/bin/sh: invalid argument").
+	// The stream keeps its own channel: TASK_STDIN / TASK_STDIN_FILE stay reachable
+	// through the text expansion they have always had.
+	stepEnv := maps.Clone(env)
 	// Stdin is read ONLY when the plan declares it consumes it. The read is bounded by
 	// EOF alone, so an inherited OPEN pipe — a harness, `bash -c`, any parent that
 	// neither writes nor closes — would block the walk forever, and `charly task` would
@@ -247,6 +269,7 @@ func newTaskRunner(ex *sdk.Executor, projDir string, t spec.Task, params map[str
 		Exec:    kit.ShellExecutor{},
 		Mode:    kit.ModeLive,
 		Env:     env,
+		StepEnv: stepEnv,
 		Verbs:   verbs,
 		Grammar: taskGrammar{base: checkkit.PlanGrammar{}},
 	})

@@ -185,6 +185,44 @@ charly task list --json           # every declared task as JSON
 charly task --all                 # every task in dependency order
 ```
 
+## A param reaches a step as DATA
+
+A step's command runs through a shell, so anything substituted into the command's
+**text** is parsed by that shell: a `$(…)` inside a value EXECUTES. A value that is
+DATA must not be delivered as SOURCE.
+
+So a task's **resolved values** — its `vars`, its `env`, its `params` (declared
+defaults overlaid with `--param` overrides) and the task's `TASK_DIR` — also reach
+every step as the step's **process environment**:
+
+```yaml
+publish:
+  task:
+    description: Publish a build
+    params:
+      out: {description: the artifact path}
+    plan:
+      - run: write the artifact
+        command: 'printf "%s" "$out" > "$TASK_DIR/artifact"'
+```
+
+`$out` is read by the **shell** (an environment variable), so the value arrives as
+one value whatever it contains — a space, a `;`, a `$(…)` — and the shell never
+re-parses it. A param whose name is lowercase is reachable this way; the `${…}`
+text form is upper-case-only, so a lowercase param was previously unreachable from a
+step.
+
+Three rules bound the channel:
+
+- **the step's own `env:` wins** a name collision — the author spoke last about
+  their own step, and the task's value is a default;
+- **a name the shell cannot export** (outside `[A-Za-z_][A-Za-z0-9_]*`) is
+  **disclosed** on the step's message, never dropped silently;
+- **a piped stdin is not a value** — `TASK_STDIN` / `TASK_STDIN_FILE` stay
+  reachable through the text form they have always had, and are not exported,
+  because the command verb renders an exported value into the command text and a
+  NUL byte would make the exec un-runnable.
+
 ## Full Go-Task parity
 
 `description`, `dir`, `env`, `vars`, `depends_on`, `sources`, `generates`, `status`,

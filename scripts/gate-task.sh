@@ -117,6 +117,15 @@ silent-skip:
         command: "echo should-not-run"
       - run: the silent step that ran
         command: "echo ran-quietly"
+datachannel:
+  task:
+    description: a param reaches a step as DATA, never as shell source
+    params:
+      out:
+        description: the value under test
+    plan:
+      - run: the param arrives in the step's process environment, verbatim
+        command: 'printf "%s" "$out" > "$TASK_DIR/datachannel.out"'
 YML
 cd "$PROJ"
 
@@ -195,6 +204,45 @@ echo "$comp_out" | grep -q 'the leaf step (its Message is the reason)' || {
 # not only in a unit test.
 printf '%s\n' "$comp_out" | sed 's/^/   | /'
 echo "   the composite carried the leaf step's reason AND its path across the hop"
+
+# ---------------------------------------------------------------------------
+# 1c) The DATA channel: a param reaches a step as DATA, never as shell source
+# (opencharly/plugin-task#34). The TEXT channel substitutes a value into a
+# step's command TEXT and the shell then PARSES that text, so a value that is
+# DATA becomes SOURCE. The environment is the other channel: a value delivered
+# as an environment variable is DATA, because the shell never re-parses the
+# result of an expansion.
+#
+# The step reads "$out" (the SHELL's own expansion), never "${out}" (the
+# expander's text channel), so this arm measures the data channel ALONE. The
+# param is named lowercase on purpose: the expander's grammar is uppercase-only,
+# so a lowercase param is unreachable from a step's text — the environment is
+# what makes it reachable BY NAME.
+#
+# The value carries a `$(…)`, so one outcome is loud and one is silent: the
+# value arrives VERBATIM and the shell does NOT execute it, or the shell ran the
+# caller's value and the marker file exists. The arm asserts both, because the
+# silent one is the failure this channel exists to remove.
+# ---------------------------------------------------------------------------
+echo "== a param reaches a step as DATA (the shell must not parse it) =="
+MARKER="$WORK/PWNED"
+rm -f "$MARKER" "$PROJ/datachannel.out"
+dc_out="$("$CH" task datachannel --param "out=\$(touch $MARKER)" 2>&1 || true)"
+if [ ! -f "$PROJ/datachannel.out" ]; then
+  echo "FAIL: the step did not write its output — the task must have run its plan" >&2
+  printf '%s\n' "$dc_out" >&2; exit 1
+fi
+dc_value="$(cat "$PROJ/datachannel.out")"
+if [ "$dc_value" != "\$(touch $MARKER)" ]; then
+  echo "FAIL: the param must reach the step's process environment VERBATIM, got '$dc_value'" >&2
+  printf '%s\n' "$dc_out" >&2; exit 1
+fi
+if [ -e "$MARKER" ]; then
+  echo "FAIL: the shell EXECUTED the caller's value — it was delivered as SOURCE, not as data" >&2
+  exit 1
+fi
+printf '%s\n' "$dc_out" | sed 's/^/   | /'
+echo "   the param arrived as data: verbatim, and unexecuted"
 
 # ---------------------------------------------------------------------------
 # 2) The generic maintenance verbs, each exercised LIVE on a real git fixture.
