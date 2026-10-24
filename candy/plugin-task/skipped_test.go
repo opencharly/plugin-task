@@ -169,6 +169,7 @@ func TestPrintResultsJSON_CarriesTheSkippedCount(t *testing.T) {
 	if _, err := buf.ReadFrom(r); err != nil {
 		t.Fatal(err)
 	}
+	_ = r.Close()
 	var decoded []struct {
 		Failed  int `json:"failed"`
 		Skipped int `json:"skipped"`
@@ -205,7 +206,11 @@ func TestRunTaskCLI_SkippedStepExitsZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	errW, _, err := os.Pipe()
+	// The stderr pipe gets BOTH ends: os.Pipe returns (read, write), and a pipe
+	// whose write end is dropped can never be drained — the read end would block a
+	// later writer forever and the descriptor would leak. The read end is drained
+	// below, after the write end is closed.
+	errR, errW, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +223,13 @@ func TestRunTaskCLI_SkippedStepExitsZero(t *testing.T) {
 		t.Fatalf("a task whose only step ran nothing must exit 0, got %v", runErr)
 	}
 	report, _ := io.ReadAll(outR)
+	_ = outR.Close()
+	stderrReport, _ := io.ReadAll(errR)
+	_ = errR.Close()
 	if !strings.Contains(string(report), "0 failed, 1 skipped") {
 		t.Fatalf("the report must name the skipped count, got:\n%s", report)
+	}
+	if stderrReport != nil && len(stderrReport) > 0 {
+		t.Fatalf("the report belongs on stdout, not stderr, got:\n%s", stderrReport)
 	}
 }
