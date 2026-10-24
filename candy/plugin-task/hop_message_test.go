@@ -126,7 +126,7 @@ func TestHopTasks_NoEvidenceKeepsTheAggregate(t *testing.T) {
 	if st != spec.StatusPass {
 		t.Fatalf("a healthy nested task must yield PASS, got %s", st)
 	}
-	if msg != "ran 1 task(s), 0 step(s) failed" {
+	if msg != "ran 1 task(s), 0 step(s) failed, 0 skipped" {
 		t.Fatalf("a nested task with no evidence must keep the aggregate, got %q", msg)
 	}
 }

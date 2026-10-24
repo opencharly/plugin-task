@@ -207,9 +207,18 @@ func printResultText(w io.Writer, r *runResult) {
 	case "error":
 		fmt.Fprintf(w, "task %s: ERROR — %s\n", r.Name, r.Message)
 	default:
-		fmt.Fprintf(w, "task %s: %d step(s), %d failed\n", r.Name, len(r.Steps), r.Failed)
+		fmt.Fprintf(w, "task %s: %d step(s), %d failed, %d skipped\n", r.Name, len(r.Steps), r.Failed, r.Skipped)
 		// silent: true keeps only the summary, suppressing the per-step lines.
 		if r.Silent {
+			// …but a SKIPPED step is not output to suppress: it is a step that
+			// never ran, and its reason is the only thing that says why. Silencing
+			// it would leave the summary claiming a count with no cause — the
+			// disclosure this bucket exists for (opencharly/plugin-task#35).
+			for _, s := range r.Steps {
+				if s.Result.Status == spec.StatusSkip {
+					fmt.Fprintln(w, formatStepLine(s))
+				}
+			}
 			return
 		}
 		for _, s := range r.Steps {
@@ -269,11 +278,12 @@ func printResultsJSON(results []*runResult) error {
 		Status  string    `json:"status"`
 		Message string    `json:"message,omitempty"`
 		Failed  int       `json:"failed"`
+		Skipped int       `json:"skipped"`
 		Steps   []stepOut `json:"steps,omitempty"`
 	}
 	out := make([]resOut, 0, len(results))
 	for _, r := range results {
-		ro := resOut{Name: r.Name, Status: r.Status, Message: r.Message, Failed: r.Failed}
+		ro := resOut{Name: r.Name, Status: r.Status, Message: r.Message, Failed: r.Failed, Skipped: r.Skipped}
 		for _, s := range r.Steps {
 			ro.Steps = append(ro.Steps, stepOut{Keyword: s.Keyword, Text: s.Text, Status: s.Result.Status.String(), Message: s.Result.Message})
 		}
@@ -347,7 +357,7 @@ func hopTasks(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, c
 	if cerr != nil {
 		return spec.StatusFail, cerr.Error()
 	}
-	ran, failed := 0, 0
+	ran, failed, skipped := 0, 0, 0
 	var steps []spec.StepResult
 	for _, n := range order {
 		resolved, perr := workflowkit.ResolveArgs(ts.tasks[n], cli)
@@ -360,12 +370,13 @@ func hopTasks(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, c
 		}
 		ran++
 		failed += r.Failed
+		skipped += r.Skipped
 		steps = append(steps, r.Steps...)
 		if st, msg := nestedVerdict(n, r); st != spec.StatusPass {
 			return st, msg
 		}
 	}
-	return spec.StatusPass, hopSummary(ran, failed, steps)
+	return spec.StatusPass, hopSummary(ran, failed, skipped, steps)
 }
 
 // hopSummary composes the `task:` hop's SUCCESS message.
@@ -387,8 +398,13 @@ func hopTasks(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, c
 // and the count is all there is. A walk that ended with failures (a continue_on_error
 // task failed a step and the hop kept walking) keeps the aggregate as the PREFIX, so
 // the count of what failed is never lost.
-func hopSummary(ran, failed int, steps []spec.StepResult) string {
-	summary := fmt.Sprintf("ran %d task(s), %d step(s) failed", ran, failed)
+//
+// The same rule covers the SKIPPED bucket: a step that ran nothing is disclosed by
+// count and by its own reason, and the aggregate is kept as the PREFIX whenever
+// anything was skipped — otherwise the count of what did not run would be exactly
+// the thing the summary dropped (opencharly/plugin-task#35).
+func hopSummary(ran, failed, skipped int, steps []spec.StepResult) string {
+	summary := fmt.Sprintf("ran %d task(s), %s", ran, stepCounts(failed, skipped))
 	var msgs []string
 	for _, s := range steps {
 		if m := strings.TrimRight(s.Result.Message, "\n"); m != "" {
@@ -398,11 +414,20 @@ func hopSummary(ran, failed int, steps []spec.StepResult) string {
 	switch {
 	case len(msgs) == 0:
 		return summary
-	case failed > 0:
+	case failed > 0 || skipped > 0:
+		// The aggregate is the PREFIX whenever a step failed OR a step ran nothing:
+		// the count of what did not run is never the thing that gets dropped.
 		return summary + "\n" + strings.Join(msgs, "\n")
 	default:
 		return strings.Join(msgs, "\n")
 	}
+}
+
+// stepCounts renders the count tail the task runner's own messages share: how many
+// steps FAILED and how many RAN NOTHING. One shape, one place — the hop aggregate and
+// the nested failure speak it, so a reader never has to learn two grammars.
+func stepCounts(failed, skipped int) string {
+	return fmt.Sprintf("%d step(s) failed, %d skipped", failed, skipped)
 }
 
 // nestedVerdict decides ONE task's verdict as it crosses the `task:` hop. It is the
@@ -437,9 +462,13 @@ func nestedVerdict(name string, r *runResult) (spec.Status, string) {
 // indented, mirroring formatStepLine so the nested text reads the same as the direct
 // run's. The top level is deliberately left alone: it already prints these lines, so
 // enriching there would duplicate the reason rather than carry it.
+//
+// The counts carry the SKIPPED bucket too: a nested failure that hid the steps which
+// ran nothing would round them back into "step" — the very reading the third bucket
+// ends (opencharly/plugin-task#35).
 func nestedFailureMessage(r *runResult) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d step(s) failed", r.Failed)
+	b.WriteString(stepCounts(r.Failed, r.Skipped))
 	for _, s := range r.Steps {
 		if s.Result.Status != spec.StatusFail {
 			continue
