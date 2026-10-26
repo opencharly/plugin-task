@@ -16,12 +16,16 @@ import (
 // outer and the reconcile then moves the nested checkout from L1 to L2. The nested
 // checkout is given L2 locally, the way a real nested remote would serve it.
 //
-// It also pins a SIBLING, `aaa-leaf`, at L1 — a plain leaf whose origin serves L2 —
-// so the umbrella carries TWO submodules and the SCOPE of a refusal is observable:
-// the paths are SORTED, so `aaa-leaf` is rolled FIRST and `outer` is refused SECOND.
-// That is the shape the product's per-path failure contract (opencharly/plugin-task#13)
-// produces, and the shape in which a refusal leaves an earlier path's staged pin
-// behind.
+// It also pins a SIBLING, `zebra`, at L1 — a plain leaf whose origin serves L2 —
+// so the umbrella carries TWO submodules and the SCOPE of a refusal is observable.
+// The paths are SORTED, and `outer` sorts BEFORE `zebra`: the refused submodule is
+// visited FIRST and the sibling AFTER. That order is what makes the scope
+// OBSERVABLE — the sibling's roll is the evidence that the walk continued past the
+// refusal (the product's per-path failure contract, opencharly/plugin-task#13), and
+// a walk that aborted at the first failure would leave the sibling at L1. With the
+// order the other way round, both a continuing walk and an aborting one leave the
+// same final state, and the scope is not observable at all — which is why the test
+// ASSERTS the order, from the product's own path reader.
 //
 // It returns the umbrella, the nested checkout's directory, the sibling's directory,
 // and the SHAs the assertions speak about.
@@ -66,17 +70,19 @@ func nestedWorkFixture(t *testing.T) (umb, innerCo, leafCo, o1, l1, l2 string) {
 	gitIn(t, outerCo, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "inner")
 	innerCo = filepath.Join(outerCo, "inner")
 	gitIn(t, innerCo, "-c", "protocol.file.allow=always", "fetch", "-q", "origin", L2)
-	// The SIBLING: a plain leaf pinned at L1, whose origin serves L2. It sorts BEFORE
-	// "outer", so the bump ROLLS it first and the refusal of "outer" is then the
-	// second thing that happens — the shape in which the refusal's scope is visible.
-	gitIn(t, umb, "-c", "protocol.file.allow=always", "submodule", "add", "-q", leafBare, "aaa-leaf")
-	gitIn(t, umb, "config", "-f", ".gitmodules", "submodule.aaa-leaf.branch", "main")
+	// The SIBLING: a plain leaf pinned at L1, whose origin serves L2. It sorts AFTER
+	// "outer" — the refused submodule is visited FIRST — so the sibling's roll is the
+	// evidence that the walk continued past the refusal: a walk that aborted at the
+	// first failure would leave the sibling at L1. The order is the product's own
+	// (gitmodulesPaths sorts), and the test ASSERTS it.
+	gitIn(t, umb, "-c", "protocol.file.allow=always", "submodule", "add", "-q", leafBare, "zebra")
+	gitIn(t, umb, "config", "-f", ".gitmodules", "submodule.zebra.branch", "main")
 	gitIn(t, umb, "add", ".gitmodules")
 	gitIn(t, umb, "commit", "-qm", "sibling branch=main")
-	gitIn(t, umb, "update-index", "--add", "--cacheinfo", "160000,"+L1+",aaa-leaf")
+	gitIn(t, umb, "update-index", "--add", "--cacheinfo", "160000,"+L1+",zebra")
 	gitIn(t, umb, "commit", "-qm", "sibling stale pin")
-	gitIn(t, umb, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "aaa-leaf")
-	leafCo = filepath.Join(umb, "aaa-leaf")
+	gitIn(t, umb, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "zebra")
+	leafCo = filepath.Join(umb, "zebra")
 	return umb, innerCo, leafCo, o1, L1, L2
 }
 
@@ -95,8 +101,8 @@ func nestedWorkFixture(t *testing.T) (umb, innerCo, leafCo, o1, l1, l2 string) {
 // not switched. A bump that refuses is the only outcome that loses nothing.
 //
 // The scope is PER-SUBMODULE, and deliberately so: the bump collects per-path failures
-// and continues (opencharly/plugin-task#13), so a sibling that sorts first still rolls.
-// The sibling's roll is asserted by
+// and continues (opencharly/plugin-task#13), so a sibling that sorts AFTER the refused
+// one still rolls. The sibling's roll is asserted by
 // TestGitSubmodules_BumpRefusalIsScopedToTheRefusedSubmodule, and this fixture carries
 // that sibling so the scope is visible here too.
 //
@@ -173,16 +179,50 @@ func TestGitSubmodules_BumpKeepsNestedWorkThatABranchHolds(t *testing.T) {
 // every pin sorted after it", proven by TestGitSubmodules_BumpContinuesPastFailure), so
 // a refusal stops ITS OWN submodule and nothing else.
 //
-// THE FIXTURE: the umbrella carries two submodules and the paths are SORTED, so
-// `aaa-leaf` is rolled FIRST and `outer` — the one whose nested checkout carries the
-// operator's work — is refused SECOND. The sibling's staged pin is the evidence that
-// the refusal is not a whole-bump abort; the refused submodule's untouched state is the
-// evidence that the refusal is not a no-op.
+// THE FIXTURE, and the ORDER that makes the scope observable: the umbrella carries two
+// submodules and the paths are SORTED, so `outer` — the one whose nested checkout
+// carries the operator's work — is refused FIRST and the sibling `zebra` is visited
+// AFTER it. The sibling's staged pin is then the evidence that the walk CONTINUED past
+// the refusal: a walk that aborted at the first failure would leave the sibling at L1
+// and this test would FAIL. (The order is the other way round in the shape that cannot
+// see the scope at all — a refused path that sorts LAST leaves the same final state
+// whether the walk continued or aborted — so the order is ASSERTED below, from the
+// product's own path reader, and not left to a reader's lexicographic intuition.)
+// The refused submodule's untouched state is the evidence that the refusal is not a
+// no-op.
+//
+// The two halves are the two claims: the refusal is scoped to ITS OWN submodule (the
+// sibling rolled, the refused one did not move), and the refusal is a real refusal (the
+// work is still there, the pin is not staged).
 //
 // Before the #54 fix this FAILS: the bump PASSES, the nested checkout is moved off the
 // operator's commit, and nothing is reported.
 func TestGitSubmodules_BumpRefusalIsScopedToTheRefusedSubmodule(t *testing.T) {
 	umb, innerCo, leafCo, o1, _, L2 := nestedWorkFixture(t)
+
+	// THE ORDER, read from the PRODUCT's own reader and ASSERTED. The scope is only
+	// observable when the refused path is visited BEFORE the sibling: the sibling's
+	// roll is what a whole-walk abort would take away. Asserted here so that a change
+	// in the order fails loudly instead of silently making this test blind.
+	order, err := gitmodulesPaths(umb)
+	if err != nil {
+		t.Fatalf("read the umbrella's own submodule order: %v", err)
+	}
+	refusedAt, siblingAt := -1, -1
+	for i, p := range order {
+		switch p {
+		case "outer":
+			refusedAt = i
+		case "zebra":
+			siblingAt = i
+		}
+	}
+	if refusedAt < 0 || siblingAt < 0 {
+		t.Fatalf("the fixture must declare both submodules, got %v", order)
+	}
+	if refusedAt > siblingAt {
+		t.Fatalf("the refused submodule must be visited BEFORE the sibling (%v) — the sibling's roll is what proves the walk continued past the refusal", order)
+	}
 
 	// The operator's work: a commit in the nested checkout that NO ref references —
 	// the shape the update drops.
@@ -212,9 +252,10 @@ func TestGitSubmodules_BumpRefusalIsScopedToTheRefusedSubmodule(t *testing.T) {
 	if got := gitIn(t, filepath.Join(umb, "outer"), "rev-parse", "HEAD"); got != o1 {
 		t.Fatalf("the refused submodule's own checkout must stay at %s, got %s", o1, got)
 	}
-	// The SIBLING rolled: the refusal is scoped to its own submodule, not the wave.
-	if got := gitlink(umb, "aaa-leaf"); got != L2 {
-		t.Fatalf("the sibling must still have rolled to %s — a refusal is per-submodule, got %s", L2, got)
+	// The SIBLING rolled: it sorts AFTER the refused path, so it is rolled only if the
+	// walk CONTINUED past the refusal. A walk that aborted here would leave it at L1.
+	if got := gitlink(umb, "zebra"); got != L2 {
+		t.Fatalf("the sibling must still have rolled to %s — the walk continues past the refusal, it does not abort — got %s", L2, got)
 	}
 	if got := gitIn(t, leafCo, "rev-parse", "HEAD"); got != L2 {
 		t.Fatalf("the sibling's checkout must be at %s, got %s", L2, got)

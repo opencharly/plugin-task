@@ -1410,7 +1410,11 @@ func submoduleAt(projDir, path string) (abs, gitArgs string, err error) {
 //
 // The refusal is PER-SUBMODULE, and that is the bump's failure contract
 // (opencharly/plugin-task#13): the walk collects a failed path and CONTINUES, so a path
-// that sorts earlier has already been rolled and staged by the time this one is refused.
+// that sorts earlier has already been rolled and staged by the time this one is refused,
+// and a path that sorts LATER still rolls after it. The scope is held MECHANICALLY by
+// TestGitSubmodules_BumpRefusalIsScopedToTheRefusedSubmodule, whose fixture refuses the
+// FIRST path and asserts that the LATER one still rolled — the order is what makes the
+// scope observable, and the test asserts the order.
 // The refusal names the nested checkout that carries the work, and the report says how
 // many paths were rolled — the scope of the refusal is the refused submodule, never the
 // tree (opencharly/plugin-task#56).
@@ -1541,7 +1545,8 @@ func treeGitlinks(gitArgs, commit string) (links map[string]string, ok bool) {
 // leaves the REFUSED SUBMODULE exactly as it was — its checkout is not switched and
 // its pin is not staged. The scope is the refused submodule and NOT the tree: the walk
 // continues past a failed path (opencharly/plugin-task#13), and a path that sorts
-// earlier has already been rolled and staged (opencharly/plugin-task#56).
+// earlier has already been rolled and staged (opencharly/plugin-task#56). The scope is
+// held by TestGitSubmodules_BumpRefusalIsScopedToTheRefusedSubmodule.
 func judgeNestedLevel(dir, gitArgs, target, label string) (spec.Status, string) {
 	links, ok := treeGitlinks(gitArgs, target)
 	paths := make([]string, 0, len(links))
