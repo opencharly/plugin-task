@@ -1404,7 +1404,20 @@ func submoduleAt(projDir, path string) (abs, gitArgs string, err error) {
 // The fetch and the switch are TWO commands, because the NESTED CHECKOUTS ARE JUDGED
 // between them (opencharly/plugin-task#54): the reconcile moves them, and a move that
 // drops the operator's work must be refused BEFORE this checkout is switched and
-// before the pin is staged — so a refusal leaves the tree exactly as it was.
+// before the pin is staged — so a refusal leaves THIS SUBMODULE exactly as it was: its
+// checkout is not switched, its pin is not staged, and the nested checkout still holds
+// the operator's commit.
+//
+// The refusal is PER-SUBMODULE, and that is the bump's failure contract
+// (opencharly/plugin-task#13): the walk collects a failed path and CONTINUES, so a path
+// that sorts earlier has already been rolled and staged by the time this one is refused,
+// and a path that sorts LATER still rolls after it. The scope is held MECHANICALLY by
+// TestGitSubmodules_BumpRefusalIsScopedToTheRefusedSubmodule, whose fixture refuses the
+// FIRST path and asserts that the LATER one still rolled — the order is what makes the
+// scope observable, and the test asserts the order.
+// The refusal names the nested checkout that carries the work, and the report says how
+// many paths were rolled — the scope of the refusal is the refused submodule, never the
+// tree (opencharly/plugin-task#56).
 func pinSubmodule(projDir, path, ref string) (spec.Status, string) {
 	abs, gitArgs, aerr := submoduleAt(projDir, path)
 	if aerr != nil {
@@ -1423,7 +1436,9 @@ func pinSubmodule(projDir, path, ref string) (spec.Status, string) {
 	// and that move does not ask: it takes a nested checkout off the commit it is at
 	// even when that commit carries work nothing else references. A bump that drops
 	// the operator's work is worse than a bump that refuses, so the work is judged
-	// here and a refusal stops the whole bump with the tree untouched.
+	// here and a refusal stops THIS SUBMODULE with its tree untouched: the checkout
+	// is not switched, the pin is not staged, and the nested checkout still holds the
+	// operator's commit. It does not stop the walk (opencharly/plugin-task#13).
 	if st, msg := judgeNestedLevel(abs, gitArgs, ref, path); st != spec.StatusPass {
 		return st, msg
 	}
@@ -1527,7 +1542,11 @@ func treeGitlinks(gitArgs, commit string) (links map[string]string, ok bool) {
 // decides, which is the arm that catches work being dropped.
 //
 // The judgement runs BEFORE anything moves (opencharly/plugin-task#54), so a refusal
-// leaves the tree exactly as it was.
+// leaves the REFUSED SUBMODULE exactly as it was — its checkout is not switched and
+// its pin is not staged. The scope is the refused submodule and NOT the tree: the walk
+// continues past a failed path (opencharly/plugin-task#13), and a path that sorts
+// earlier has already been rolled and staged (opencharly/plugin-task#56). The scope is
+// held by TestGitSubmodules_BumpRefusalIsScopedToTheRefusedSubmodule.
 func judgeNestedLevel(dir, gitArgs, target, label string) (spec.Status, string) {
 	links, ok := treeGitlinks(gitArgs, target)
 	paths := make([]string, 0, len(links))
