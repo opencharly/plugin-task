@@ -877,7 +877,7 @@ func newBumpUmbrella(t *testing.T, base, pinSHA, leafBare, doomedBare string, na
 // `git add`, the mechanism reproduced in the issue — stranded the whole remainder.
 func TestGitSubmodules_BumpContinuesPastFailure(t *testing.T) {
 	base, leafBare, doomedBare, L1, L2 := bumpOrigins(t)
-	// Path order is SORTED (submodulePaths), so `doomed` is visited FIRST and `zebra`
+	// Path order is SORTED (gitmodulesPaths), so `doomed` is visited FIRST and `zebra`
 	// sorts AFTER it — exactly the ordering that used to strand the rest.
 	umb := newBumpUmbrella(t, base, L1, leafBare, doomedBare, "doomed", "zebra")
 	// The failing path's failure is set up AFTER initialization: its origin is GONE,
