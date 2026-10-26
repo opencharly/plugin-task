@@ -279,7 +279,7 @@ func branchMerged(repoDir, branch, tip, base string, prs map[string][]prInfo, gh
 // strictly smaller, never larger).
 func pruneRepos(projDir string) []string {
 	repos := []string{projDir}
-	subs, err := submodulePaths(projDir)
+	subs, err := gitmodulesPaths(projDir)
 	if err != nil {
 		return repos
 	}

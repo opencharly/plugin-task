@@ -130,9 +130,12 @@ func hostCapture(ctx context.Context, dir, script string) (string, string, int) 
 	return stdout.String(), stderr.String(), exit
 }
 
-// submodulePaths lists every `submodule.<name>.path` in .gitmodules (sorted).
-func submodulePaths(projDir string) ([]string, error) {
-	out, _, exit := hostCapture(context.Background(), projDir,
+// gitmodulesPaths lists every `submodule.<name>.path` in the .gitmodules OF `dir`
+// (sorted). `dir` is the directory the .gitmodules is read from, so the same reader
+// serves the PROJECT's own .gitmodules and the one a submodule declares for its own
+// nested checkouts (opencharly/plugin-task#54) — one reader, one shape.
+func gitmodulesPaths(dir string) ([]string, error) {
+	out, _, exit := hostCapture(context.Background(), dir,
 		"git config -f .gitmodules --get-regexp '^submodule\\..*\\.path$' | awk '{print $2}'")
 	if exit != 0 {
 		return nil, fmt.Errorf("read .gitmodules (exit %d)", exit)
@@ -523,7 +526,7 @@ func (g pinGraph) edgeSources(paths []string) []edgeRef {
 // advance, because a sync over a tree it could not fully advance must never report
 // success.
 func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status, string) {
-	paths, err := submodulePaths(projDir)
+	paths, err := gitmodulesPaths(projDir)
 	if err != nil {
 		return spec.StatusFail, err.Error()
 	}
@@ -1397,18 +1400,35 @@ func submoduleAt(projDir, path string) (abs, gitArgs string, err error) {
 // clone — the exact failure sync-gitlinks.sh documents), detaches, and stages.
 // It refuses an uninitialized submodule (charly#768) and drives the checkout
 // through submoduleAt's walk-up-safe `--git-dir`/`--work-tree` form.
+//
+// The fetch and the switch are TWO commands, because the NESTED CHECKOUTS ARE JUDGED
+// between them (opencharly/plugin-task#54): the reconcile moves them, and a move that
+// drops the operator's work must be refused BEFORE this checkout is switched and
+// before the pin is staged — so a refusal leaves the tree exactly as it was.
 func pinSubmodule(projDir, path, ref string) (spec.Status, string) {
-	_, gitArgs, aerr := submoduleAt(projDir, path)
+	abs, gitArgs, aerr := submoduleAt(projDir, path)
 	if aerr != nil {
 		return spec.StatusFail, aerr.Error()
 	}
 	fetch := fmt.Sprintf(
 		"set -e; git %s fetch --quiet origin; "+
-			"if ! git %s cat-file -e %s^{commit} 2>/dev/null; then git %s fetch --quiet origin %s; fi; "+
-			"git %s switch --quiet --detach %s",
-		gitArgs, gitArgs, shellQuote(ref), gitArgs, shellQuote(ref), gitArgs, shellQuote(ref))
+			"if ! git %s cat-file -e %s^{commit} 2>/dev/null; then git %s fetch --quiet origin %s; fi",
+		gitArgs, gitArgs, shellQuote(ref), gitArgs, shellQuote(ref))
 	_, stderr, exit := hostCapture(context.Background(), projDir, fetch)
 	if exit != 0 {
+		return spec.StatusFail, fmt.Sprintf("pin %s -> %s failed: %s", path, ref, strings.TrimSpace(stderr))
+	}
+	// JUDGE THE NESTED CHECKOUTS, before this checkout moves and before the pin is
+	// staged. The reconcile below moves them with `git submodule update --recursive`,
+	// and that move does not ask: it takes a nested checkout off the commit it is at
+	// even when that commit carries work nothing else references. A bump that drops
+	// the operator's work is worse than a bump that refuses, so the work is judged
+	// here and a refusal stops the whole bump with the tree untouched.
+	if st, msg := judgeNestedLevel(abs, gitArgs, ref, path); st != spec.StatusPass {
+		return st, msg
+	}
+	switchCmd := fmt.Sprintf("git %s switch --quiet --detach %s", gitArgs, shellQuote(ref))
+	if _, stderr, exit := hostCapture(context.Background(), projDir, switchCmd); exit != 0 {
 		return spec.StatusFail, fmt.Sprintf("pin %s -> %s failed: %s", path, ref, strings.TrimSpace(stderr))
 	}
 	// Stage the gitlink in the SUPERPROJECT (a separate repo from the submodule,
@@ -1424,7 +1444,9 @@ func pinSubmodule(projDir, path, ref string) (spec.Status, string) {
 	// `git-submodules verify` then fails twice over, on a change this very bump just
 	// made. The reconciliation is recursive (a nested checkout can itself nest) and a
 	// failure to complete it is a hard error: a bump that leaves the tree dirty is
-	// worse than a bump that refuses.
+	// worse than a bump that refuses. What the move would DESTROY was judged before
+	// the switch (judgeNestedLevel), so this step only ever moves checkouts whose
+	// work survives the move.
 	if st, msg := reconcileNestedCheckouts(projDir, path); st != spec.StatusPass {
 		return st, msg
 	}
@@ -1460,10 +1482,166 @@ func advancePinInIndex(projDir, path, sha string) (spec.Status, string) {
 	return spec.StatusPass, ""
 }
 
+// treeGitlinks maps every GITLINK path in `commit`'s tree to the commit it records.
+//
+// A gitlink is the tree entry of a submodule: mode 160000, and the SHA it carries is the
+// commit the submodule is pinned at.
+//
+// `ok` is false when the tree could not be read here (an object this repo does not
+// have) — the caller then falls back to what the checkout declares, and says so in its
+// own report. `ok` is true for a tree that records NO submodule at all: that is a fact
+// about the tree, not a missing object, and the two must not be folded together.
+func treeGitlinks(gitArgs, commit string) (links map[string]string, ok bool) {
+	links = map[string]string{}
+	if commit == "" {
+		return links, false
+	}
+	out, _, exit := hostCapture(context.Background(), "",
+		fmt.Sprintf("git %s ls-tree %s", gitArgs, shellQuote(commit)))
+	if exit != 0 {
+		return links, false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		// ls-tree prints "<mode> SP <type> SP <object> TAB <path>"; the path is the
+		// LAST field and may contain spaces, so it is cut on the TAB, not split.
+		meta, path, cut := strings.Cut(line, "\t")
+		if !cut {
+			continue
+		}
+		f := strings.Fields(meta)
+		if len(f) != 3 || f[0] != "160000" {
+			continue
+		}
+		links[path] = f[2]
+	}
+	return links, true
+}
+
+// judgeNestedLevel judges every nested checkout under `dir` that the reconcile would
+// MOVE, and recurses into them.
+//
+// `target` is the commit the checkout at `dir` will be AT once the pin lands: the
+// gitlinks THAT commit records are what each nested checkout is moved to. It is "" when
+// the commit cannot be read here (an object this repo does not have) — then the paths
+// come from the checkout's OWN .gitmodules and only the ref arm of the judgement
+// decides, which is the arm that catches work being dropped.
+//
+// The judgement runs BEFORE anything moves (opencharly/plugin-task#54), so a refusal
+// leaves the tree exactly as it was.
+func judgeNestedLevel(dir, gitArgs, target, label string) (spec.Status, string) {
+	links, ok := treeGitlinks(gitArgs, target)
+	paths := make([]string, 0, len(links))
+	for p := range links {
+		paths = append(paths, p)
+	}
+	if !ok {
+		// The target's tree could not be read here: fall back to the paths the
+		// checkout DECLARES, which is what the update consults when the target's tree
+		// is not available to it either.
+		paths, _ = gitmodulesPaths(dir)
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		if !submoduleInitialized(dir, p) {
+			// No checkout: the update never initializes one (no `--init`), so there is
+			// nothing to move and nothing to lose.
+			continue
+		}
+		rec := links[p]
+		if st, msg := judgeNestedCheckout(dir, p, rec, label+"/"+p); st != spec.StatusPass {
+			return st, msg
+		}
+		// RECURSE: that checkout will be at `rec`, and ITS nested checkouts are moved
+		// to the gitlinks `rec` records.
+		_, ngitArgs, aerr := submoduleAt(dir, p)
+		if aerr != nil {
+			continue
+		}
+		if st, msg := judgeNestedLevel(filepath.Join(dir, p), ngitArgs, rec, label+"/"+p); st != spec.StatusPass {
+			return st, msg
+		}
+	}
+	return spec.StatusPass, ""
+}
+
+// judgeNestedCheckout decides whether the reconcile may MOVE the initialized nested
+// checkout at `dir/path`, whose recorded gitlink is `rec`.
+//
+// THE QUESTION IS ONE: after the move, will the commit the checkout is at still be
+// reachable? git's `submodule update --recursive` moves a nested checkout onto the
+// recorded gitlink WITHOUT asking, and a commit that nothing else references is
+// dropped from HEAD and survives only in the reflog — the operator's work, gone, with
+// exit 0 and nothing reported.
+//
+// MEASURED (git 2.56, four shapes, a real umbrella -> outer -> inner fixture):
+//
+//	nested checkout at                      the update   the local commit
+//	-----------------------------------------------------------------------
+//	the recorded pin, behind                exit 0       nothing to lose
+//	the recorded pin + a commit on a branch exit 0       kept by that branch
+//	the recorded pin + an ORPHAN commit     exit 0       DROPPED, reported by nothing
+//	the recorded pin + a dirty file         exit 1       git refuses, loudly
+//
+// So the checkout may be moved when the commit it is at will still be reachable: when
+// the move goes FORWARD onto it (it is an ancestor of the recorded gitlink) or when a
+// ref in that checkout still contains it (the commit survives the move on that ref).
+// Otherwise the bump REFUSES, naming the path.
+//
+// The ancestry arm is decisive only when the recorded commit is present locally; when
+// it is not, the ref arm decides, and the refusal says the pin was unreadable.
+func judgeNestedCheckout(dir, path, rec, label string) (spec.Status, string) {
+	_, gitArgs, aerr := submoduleAt(dir, path)
+	if aerr != nil {
+		return spec.StatusFail, aerr.Error()
+	}
+	head, _, exit := hostCapture(context.Background(), dir,
+		fmt.Sprintf("git %s rev-parse HEAD", gitArgs))
+	if exit != 0 {
+		// No HEAD (an unborn branch): there is no commit to lose.
+		return spec.StatusPass, ""
+	}
+	head = strings.TrimSpace(head)
+	if rec == head {
+		// Already AT the recorded gitlink: the move is a no-op for it.
+		return spec.StatusPass, ""
+	}
+	// The move goes FORWARD onto this commit: the update only adds history, so the
+	// commit it is at survives the move.
+	if rec != "" {
+		if _, _, exit := hostCapture(context.Background(), dir,
+			fmt.Sprintf("git %s merge-base --is-ancestor %s %s",
+				gitArgs, shellQuote(head), shellQuote(rec))); exit == 0 {
+			return spec.StatusPass, ""
+		}
+	}
+	// A ref in that checkout still contains the commit, so the move cannot lose it.
+	out, _, exit := hostCapture(context.Background(), dir,
+		fmt.Sprintf("git %s for-each-ref --contains %s --format=%s",
+			gitArgs, shellQuote(head), shellQuote("%(refname)")))
+	if exit == 0 && strings.TrimSpace(out) != "" {
+		return spec.StatusPass, ""
+	}
+	return spec.StatusFail, fmt.Sprintf(
+		"the nested checkout %s carries a commit the update would drop — its HEAD %s is in no branch, "+
+			"tag or remote-tracking ref of that checkout%s, so the update would move it off that commit "+
+			"and leave it in the reflog alone; push it, branch it, or stash it, then re-run",
+		label, head, pinNote(rec))
+}
+
+// pinNote names the recorded pin in a refusal, and says so when it could not be read
+// here — the two are different facts, and a refusal that hides either sends the reader
+// looking for the wrong cause.
+func pinNote(rec string) string {
+	if rec == "" {
+		return " (the recorded pin could not be read here, so only the checkout's own refs could decide)"
+	}
+	return fmt.Sprintf(" (the recorded pin is %s)", rec)
+}
+
 // reconcileNestedCheckouts brings a just-pinned submodule's OWN nested checkouts back
 // onto the gitlinks its new commit records — the state `verify` demands.
 //
-// GUARDED twice over, and both guards are load-bearing:
+// GUARDED three times over, and every guard is load-bearing:
 //   - a submodule with no `.gitmodules` is UNTOUCHED — a plain file test, no git call, no
 //     network, no new failure mode for the majority of submodules;
 //   - the update is `--recursive` WITHOUT `--init`: it moves the nested checkouts that are
@@ -1472,7 +1650,12 @@ func advancePinInIndex(projDir, path, sha string) (spec.Status, string) {
 //     tidiness: `--init` would fetch nested remotes on every bump (including file-protocol
 //     fixtures, which would need a protocol loosening this verb must not bake in), and a
 //     bump is not the place to grow the checkout. The recursion is still there because a
-//     nested checkout can itself nest.
+//     nested checkout can itself nest;
+//   - what the update would DESTROY is judged BEFORE it runs (judgeNestedLevel, called
+//     from pinSubmodule before the switch): the update moves a nested checkout off a
+//     commit that carries work nothing else references, silently and with exit 0
+//     (opencharly/plugin-task#54), so the work is judged up front and a checkout that
+//     carries it is never moved.
 //
 // A reconcile that cannot complete is a hard error, not a warning: a bump that leaves the
 // tree dirty is worse than a bump that refuses (this is the defect itself).
