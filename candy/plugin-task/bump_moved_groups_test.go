@@ -249,9 +249,50 @@ func TestGitSubmodules_BumpFailureReportCarriesTheMovedCounters(t *testing.T) {
 // This is the property the three groups exist to have, so it is asserted on the REPORT
 // and not on the internal counters: a report whose numbers do not add up is a report a
 // reader cannot trust, whatever the counters behind it are.
+//
+// The fixture is built so the sum is OBSERVABLE. A report that counted the pins it
+// TOUCHED instead of the pins it MOVED — the opencharly/plugin-task#53 defect —
+// prints a different number in a clause than in the total, and the sum is what catches
+// it:
+//
+//   - `zebra` is a materialised submodule pinned one commit BEHIND its origin's tip,
+//     so the walk ROLLS it and one pin moves;
+//   - `quagga` is DECLARED, has NO checkout, and its recorded pin is ALREADY the
+//     remote's tip. The walk writes it — it must record where the pin is, even when
+//     the answer is "where it already was" — and it moves NOTHING.
+//
+// So the report reads 1 rolled + 0 in the index + 0 edges = 1 moved, while the walk
+// TOUCHED two paths. A report that counted writes would print 2 in the index clause,
+// and the four printed numbers would no longer add up.
+//
+// The sum is asserted on the RELATION alone: the clause numbers are the business of
+// the group tests, and an assertion here on a clause would catch that defect one
+// clause earlier and leave the sum itself unexercised.
 func TestGitSubmodules_BumpMovedCountsSumToTheMovedTotal(t *testing.T) {
-	base, leafBare, doomedBare, L1, _ := bumpOrigins(t)
+	base, leafBare, doomedBare, L1, L2 := bumpOrigins(t)
 	umb := newBumpUmbrella(t, base, L1, leafBare, doomedBare, "zebra")
+
+	// `quagga` — declared, unmaterialized, and already CURRENT. It is appended to the
+	// .gitmodules `zebra` already wrote, and its pin is recorded in the INDEX, because
+	// a path with no checkout carries its pin there (opencharly/plugin-task#37).
+	gitmodules, err := os.ReadFile(filepath.Join(umb, ".gitmodules"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(umb, ".gitmodules"),
+		string(gitmodules)+"[submodule \"quagga\"]\n\tpath = quagga\n\turl = "+leafBare+"\n\tbranch = main\n")
+	gitIn(t, umb, "add", ".gitmodules")
+	gitIn(t, umb, "update-index", "--add", "--cacheinfo", "160000,"+L2+",quagga")
+	gitIn(t, umb, "commit", "-qm", "an unmaterialized path that is already current")
+	if err := os.MkdirAll(filepath.Join(umb, "quagga"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(umb, "quagga", ".git")); err == nil {
+		t.Fatalf("fixture precondition: quagga must have no .git")
+	}
+	if got := gitlink(umb, "quagga"); got != L2 {
+		t.Fatalf("fixture precondition: quagga's recorded pin must be the remote's CURRENT tip %s, got %s", L2, got)
+	}
 
 	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
 	if st != spec.StatusPass {
