@@ -578,6 +578,24 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		// — costs that ONE pin instead of every pin sorted after it. Every failure is
 		// reported together at the end, so the run's own output names all of them.
 		var done, pinned, inIndex, failures []string
+		// MOVED, not WRITTEN (opencharly/plugin-task#53).
+		//
+		// The three groups above are WRITES: a pin that was already current is still
+		// written, because the walk must record where the pin is even when the answer
+		// is "where it already was". So the counts name how many pins the wave TOUCHED,
+		// and the counters below name how many of them actually MOVED — the value the
+		// superproject's index records for that path is a DIFFERENT one from the one it
+		// recorded before. A report that conflates the two tells the reader a wave
+		// moved 400 pins when it moved 4.
+		//
+		// The groups PARTITION the paths the walk touched — every touched path is in
+		// exactly one of them, so the three moved counters SUM to the moved total:
+		//   done    — phase-1 paths WITH a checkout, rolled to their default-branch HEAD
+		//   inIndex — phase-1 paths with NO checkout, advanced in the index
+		//   pinned  — the pin_map entries, each advanced in the index or rolled onto
+		//   its twin, and counted HERE and not in the two groups above, so the groups
+		//   stay disjoint and the sum is the truth.
+		rolledMoved, indexMoved, pinnedMoved := 0, 0, 0
 		// pinned_from may be an EXTERNAL checkout (`../src`) rather than one of this
 		// project's OWN submodules; only a pinned_from that IS one of `paths` is rolled
 		// by phase 1, so only that case can be judged "did not roll". An external
@@ -658,17 +676,28 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 						"the remote for %q does not serve refs/heads/%s, so its pin cannot be advanced", p, branch))
 					continue
 				}
+				// The pin the index ALREADY records, read BEFORE the write: a write
+				// that records the value the index already holds moved nothing.
+				recorded := gitlink(projDir, p)
 				if st, msg := advancePinInIndex(projDir, p, sha); st != spec.StatusPass {
 					failures = append(failures, msg)
 					continue
 				}
 				inIndex = append(inIndex, p)
+				// The write records EXACTLY `sha`, so the comparison against the
+				// value the index carried before it IS the change.
+				if recorded != sha {
+					indexMoved++
+				}
 				// A source whose own pin advanced here still has no TREE to read a
 				// twin from - an unmaterialized source has no checkout at all - and
 				// the state already says so: it is classified by the CHECKOUT
 				// before phase 1 (opencharly/plugin-task#39).
 				continue
 			}
+			// The pin the index records BEFORE the roll; the roll stages the
+			// checkout's new HEAD, so the value is read again after it.
+			recorded := gitlink(projDir, p)
 			if st, msg := pinSubmodule(projDir, p, "origin/"+branch); st != spec.StatusPass {
 				failures = append(failures, msg)
 				continue
@@ -677,6 +706,11 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 				pinnedFromState = "rolled"
 			}
 			done = append(done, p)
+			// A checkout that was already at the branch tip, and whose pin the
+			// index already recorded, is a roll that moved nothing.
+			if gitlink(projDir, p) != recorded {
+				rolledMoved++
+			}
 		}
 		// Phase 2: pin each pin_map entry from the (now-current) pinned_from gitlinks.
 		//
@@ -709,6 +743,8 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 					failures = append(failures, fmt.Sprintf("no gitlink for %q in %q", cpath, in.PinnedFrom))
 					continue
 				}
+				// The pin the index records BEFORE the move.
+				recorded := gitlink(projDir, upath)
 				if !submoduleInitialized(projDir, upath) {
 					// UNMATERIALIZED edge: the pin moves in the index, to the twin
 					// the source's CURRENT tree records.
@@ -716,12 +752,22 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 						failures = append(failures, msg)
 						continue
 					}
-					inIndex = append(inIndex, upath)
 				} else if st, msg := pinSubmodule(projDir, upath, sha); st != spec.StatusPass {
 					failures = append(failures, msg)
 					continue
 				}
 				pinned = append(pinned, upath)
+				// BOTH branches record EXACTLY `sha` in the index — the index write,
+				// or the roll staged onto the checkout that now sits at `sha` — so one
+				// comparison against the value the index carried before answers
+				// whether the pin MOVED.
+				//
+				// A pin_map entry is counted HERE and not in the index-advance group:
+				// the groups partition the paths the walk touched, so the moved
+				// counters sum to the moved total instead of counting an edge twice.
+				if recorded != sha {
+					pinnedMoved++
+				}
 			}
 		}
 		sort.Strings(done)
@@ -732,12 +778,28 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		// rolled/pinned name lists are long enough (422 names on a full umbrella) that appending the
 		// diagnostic after them is how it gets truncated away before a reader sees it. A message that
 		// reports what went wrong must lead with it.
-		if len(failures) > 0 {
-			return spec.StatusFail, fmt.Sprintf("%d pin(s) FAILED: %s; rolled %d submodule(s) to their default-branch HEAD; advanced %d pin(s) in the index; pinned %d pin_map entr(y|ies): %s",
-				len(failures), strings.Join(failures, "; "), len(done), len(inIndex), len(pinned), strings.Join(pinned, ", "))
+		//
+		// Every group carries TWO numbers: how many pins it TOUCHED and how many of
+		// them MOVED (opencharly/plugin-task#53). The touched count is a WRITE count —
+		// a pin that was already current is still written — and the moved count is
+		// the one an operator quotes, so the two must never be one number.
+		//
+		// The three groups are a PARTITION, and they say so: the two leaf clauses
+		// count LEAF pins (the plugin's own vocabulary — the currency report says
+		// "upstream leaf/leaves" and "derived-from edge(s)" too), the pin_map clause
+		// counts the EDGES, and the three moved counts SUM to the moved total.
+		moved := rolledMoved + indexMoved + pinnedMoved
+		pinnedNames := strings.Join(pinned, ", ")
+		if pinnedNames == "" {
+			pinnedNames = "none"
 		}
-		return spec.StatusPass, fmt.Sprintf("pinned %d pin_map entr(y|ies) (%s) after rolling %d submodule(s) to their default-branch HEAD and advancing %d pin(s) in the index",
-			len(pinned), strings.Join(pinned, ", "), len(done), len(inIndex))
+		if len(failures) > 0 {
+			return spec.StatusFail, fmt.Sprintf("%d pin(s) FAILED: %s; rolled %d leaf submodule(s) to their default-branch HEAD (%d moved); advanced %d leaf pin(s) in the index (%d moved); pinned %d pin_map entr(y|ies) (%d moved): %s; %d pin(s) moved",
+				len(failures), strings.Join(failures, "; "),
+				len(done), rolledMoved, len(inIndex), indexMoved, len(pinned), pinnedMoved, pinnedNames, moved)
+		}
+		return spec.StatusPass, fmt.Sprintf("pinned %d pin_map entr(y|ies) (%s; %d moved) after rolling %d leaf submodule(s) to their default-branch HEAD (%d moved) and advancing %d leaf pin(s) in the index (%d moved); %d pin(s) moved",
+			len(pinned), pinnedNames, pinnedMoved, len(done), rolledMoved, len(inIndex), indexMoved, moved)
 
 	case "verify":
 		// Half 1 — the derived EDGE: every pin_map entry must equal pinned_from's twin.
