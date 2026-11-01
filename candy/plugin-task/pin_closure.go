@@ -249,10 +249,17 @@ func goTmpDir() string {
 	if dir := os.Getenv("GOTMPDIR"); dir != "" {
 		return dir
 	}
+	// The dir is MADE here, not assumed: pointing GOTMPDIR at a path that does not exist makes the
+	// toolchain's own temp-file creation fail on a fresh host, which would surface as a build error
+	// this verb would then have to explain.
+	dir := os.TempDir()
 	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".cache", "go-tmp")
+		dir = filepath.Join(home, ".cache", "go-tmp")
 	}
-	return os.TempDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return os.TempDir() // the toolchain's own default, rather than a path we could not create
+	}
+	return dir
 }
 
 // moduleCacheDir resolves a downloaded module version's source dir, or "".
@@ -324,7 +331,21 @@ func runPinClosure(projDir string, in params.PinClosureInput) (spec.Status, stri
 		adopted := 0
 		for _, f := range failures {
 			module := moduleOf(anchor, workFile, f.Pkg)
-			if _, seen := verdicts[module]; seen {
+			if prev, seen := verdicts[module]; seen {
+				// A module ADOPTED at an earlier rung that STILL fails is the false-BUMP direction,
+				// the one classifyClosure's own comment warns about: its newest version fixed the
+				// symbol we named and the composed set still does not compile, so the bump was not
+				// the fix. Dropping it here made the verdicts map the only record, editCount 0, and
+				// the report say "advance: CLEAN — need only a pin bump" about a module that
+				// provably does not compile. Record the EDIT, with the failure that proves it.
+				if prev.Kind == "BUMP" {
+					evidence := "adopted a bump and the composed set still fails"
+					if len(f.Lines) > 0 {
+						evidence += ": " + f.Lines[0]
+					}
+					verdicts[module] = closureVerdict{Kind: "EDIT", Evidence: evidence}
+					edits = append(edits, module)
+				}
 				continue
 			}
 			// Classify against the module the FAILING PACKAGE belongs to, not the
@@ -465,8 +486,6 @@ func writeOverlay(workDir, goLine string, members []string, replaces map[string]
 	return path
 }
 
-// firstLines bounds a tool's own words for the Message: enough to see the cause,
-// never enough to swamp the report.
 // workspaceGo is the `go` line the generated workspace carries. It is the ANCHOR's own directive,
 // read from the module whose pins this verb resolves — a fixed literal over-constrains every closure
 // build to one toolchain (a module declaring go 1.24 built under a workspace demanding 1.26.4) and
@@ -485,6 +504,8 @@ func workspaceGo(anchorDir string) string {
 	return "1.21"
 }
 
+// firstLines bounds a tool's own words for the Message: enough to see the cause,
+// never enough to swamp the report.
 func firstLines(s string, n int) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	if len(lines) > n {

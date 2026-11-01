@@ -273,3 +273,46 @@ func TestWriteOverlay_AdoptsADirOrAVersion(t *testing.T) {
 		t.Errorf("the workspace must not carry the retired hardcoded floor\n%s", got)
 	}
 }
+
+// TestRunPinClosure_AdoptedButStillFailingIsAnEDIT is the false-BUMP guard. A module whose newest
+// version fixed the named symbol but whose composed set STILL does not compile must not be dropped
+// from the verdicts: dropping it left `edits` empty and the report claiming "advance: CLEAN — need
+// only a pin bump" about a module that provably fails, which is the dangerous direction this verb
+// exists to refuse.
+func TestRunPinClosure_AdoptedButStillFailingIsAnEDIT(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+	write("anchor/go.mod", "module example.com/anchor\n\ngo 1.24\n\nrequire example.com/dep v0.1.0\n\nreplace example.com/dep => ../depold\n")
+	write("anchor/main.go", "package main\n\nimport \"example.com/dep\"\n\nfunc main() { dep.Fine() }\n")
+	write("depold/go.mod", "module example.com/dep\n\ngo 1.24\n")
+	write("depold/dep.go", "package dep\n\nfunc Fine() { retired() }\n")
+	// The "newest version" fixed `retired` but introduced a DIFFERENT breakage: the bump is not the
+	// fix, and the verb must say so rather than report the module as bumpable.
+	write("depnew/go.mod", "module example.com/dep\n\ngo 1.24\n")
+	write("depnew/dep.go", "package dep\n\nfunc Fine() { alsoMissing() }\n")
+
+	orig := newestModuleVersionFn
+	newestModuleVersionFn = func(anchorDir, module string) (string, string) {
+		return "v0.2.0", filepath.Join(root, "depnew")
+	}
+	defer func() { newestModuleVersionFn = orig }()
+
+	status, msg := runPinClosure(root, params.PinClosureInput{Anchor: filepath.Join(root, "anchor")})
+	if status != spec.StatusFail {
+		t.Fatalf("runPinClosure = %s, want FAIL — a module whose newest version still does not compile is not bumpable\n%s", status, msg)
+	}
+	if strings.Contains(msg, "advance: CLEAN") {
+		t.Errorf("the report must not claim the pair is CLEAN when the adopted module still fails\n%s", msg)
+	}
+	if !strings.Contains(msg, "closure: EDIT") || !strings.Contains(msg, "still fails") {
+		t.Errorf("the re-failing module must be reported as EDIT carrying the failure\n%s", msg)
+	}
+}
