@@ -174,13 +174,13 @@ func renderClosureReport(pair string, rungs []string, order []string, verdicts m
 		} else {
 			editCount++
 		}
-		b.WriteString(fmt.Sprintf("closure: %-8s %-58s %s\n", v.Kind, m, v.Evidence))
+		fmt.Fprintf(&b, "closure: %-8s %-58s %s\n", v.Kind, m, v.Evidence)
 	}
 	if editCount > 0 {
-		b.WriteString(fmt.Sprintf("advance: REFUSED — %d module(s) need an EDIT (their own cutover), %d can be adopted by a pin bump: %s\n",
-			editCount, bumps, strings.Join(edits, ", ")))
+		fmt.Fprintf(&b, "advance: REFUSED — %d module(s) need an EDIT (their own cutover), %d can be adopted by a pin bump: %s\n",
+			editCount, bumps, strings.Join(edits, ", "))
 	} else {
-		b.WriteString(fmt.Sprintf("advance: CLEAN at this pair — %d module(s) need only a pin bump\n", bumps))
+		fmt.Fprintf(&b, "advance: CLEAN at this pair — %d module(s) need only a pin bump\n", bumps)
 	}
 	return b.String()
 }
@@ -295,7 +295,7 @@ func runPinClosure(projDir string, in params.PinClosureInput) (spec.Status, stri
 	if err != nil {
 		return spec.StatusFail, fmt.Sprintf("pin-closure: temp overlay dir: %v", err)
 	}
-	defer os.RemoveAll(workDir)
+	defer func() { _ = os.RemoveAll(workDir) }() // best-effort: the overlay is a temp dir
 	pair := resolvedPair(anchor, in.ModulePrefix)
 	// The workspace names the anchor MODULE dir itself: naming its parent makes go
 	// reject the workspace ("module not found"), which fails the build with no "# pkg"
