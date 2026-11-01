@@ -55,6 +55,9 @@ func NewMeta() pb.PluginMetaServer {
 		{Class: "verb", Word: "file-parity", InputDef: "#FileParityInput"},
 		{Class: "verb", Word: "splice-region", InputDef: "#SpliceRegionInput"},
 		{Class: "verb", Word: "module-pins", InputDef: "#ModulePinsInput"},
+		// pin-closure: the TRANSITIVE CLOSURE of a pin advance — compile, collect
+		// every failing module, classify BUMP-vs-EDIT, repeat to a fixed point.
+		{Class: "verb", Word: "pin-closure", InputDef: "#PinClosureInput"},
 		{Class: "verb", Word: "prune", InputDef: "#PruneInput"},
 	}, schemaFS)
 }
@@ -77,7 +80,7 @@ func (p *provider) Invoke(ctx context.Context, req *pb.InvokeRequest) (*pb.Invok
 			// (`{"args":[...]}`); the verb path carries a plugin_input map
 			// (`{"task":...,"param":[...]}`), distinguished by the input shape.
 			return invokeOpRun(ctx, req)
-		case "git-submodules", "file-parity", "splice-region", "module-pins", "prune":
+		case "git-submodules", "file-parity", "splice-region", "module-pins", "pin-closure", "prune":
 			// The generic maintenance verbs: decode the op envelope's nested
 			// plugin_input and run the host-native handler.
 			return invokeMaintenanceVerb(req)

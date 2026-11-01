@@ -757,6 +757,48 @@ grep -q 'github.com/opencharly/sdk v1.2.3' tools/m1/go.mod || { echo "FAIL: modu
 mods2_out="$("$CH" task mods-check)"; echo "$mods2_out" | grep -q '0 failed' || { echo "FAIL: module-pins check must pass after adopt" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
+# 2f) verb:pin-closure — the TRANSITIVE CLOSURE of a pin advance, LIVE.
+# The verb compiles the composed set under a generated overlay workspace and
+# classifies every failing module: a BUMP when a published version already carries
+# the fix, an EDIT when none does (the module needs its own cutover). Two anchors
+# prove both ends without a network: a COMPILING module must report an EMPTY
+# closure and pass, and a module with an undefined symbol must be classified EDIT
+# and the advance REFUSED — the shape that must never be silently "adopted".
+# ---------------------------------------------------------------------------
+CLS="$WORK/closure"
+mkdir -p "$CLS/anchor" "$CLS/broken"
+printf 'module example.com/anchor\n\ngo 1.24\n' > "$CLS/anchor/go.mod"
+printf 'package main\n\nfunc main() { println("ok") }\n' > "$CLS/anchor/main.go"
+printf 'module example.com/broken\n\ngo 1.24\n' > "$CLS/broken/go.mod"
+printf 'package main\n\nfunc main() { undefinedSymbol() }\n' > "$CLS/broken/main.go"
+cat > "$CLS/charly.yml" <<YML
+closure-pass:
+  task:
+    description: the composed set compiles, so the closure is EMPTY
+    dir: .
+    plan:
+      - run: resolve the closure of the compiling anchor
+        pin-closure: {anchor: $CLS/anchor, module_prefix: "example.com"}
+        context: [deploy]
+closure-edit:
+  task:
+    description: a failing package no pin bump can fix
+    dir: .
+    plan:
+      - run: classify the failing package
+        pin-closure: {anchor: $CLS/broken, module_prefix: "example.com"}
+        context: [deploy]
+YML
+echo "== verb:pin-closure (a compiling set PASSES; an EDIT is REFUSED) =="
+cls_out="$(cd "$CLS" && "$CH" task closure-pass)" || { echo "FAIL: pin-closure must pass on a compiling set" >&2; printf '%s\n' "$cls_out" >&2; exit 1; }
+printf '%s\n' "$cls_out" | grep -q 'closure: EMPTY' || { echo "FAIL: a compiling set must report an EMPTY closure" >&2; printf '%s\n' "$cls_out" >&2; exit 1; }
+echo "   closure EMPTY — the composed set compiles"
+if cls_edit="$(cd "$CLS" && "$CH" task closure-edit)"; then echo "FAIL: an unresolved EDIT must fail, never pass" >&2; printf '%s\n' "$cls_edit" >&2; exit 1; fi
+printf '%s\n' "$cls_edit" | grep -q 'closure: EDIT' || { echo "FAIL: the failing package must be classified EDIT" >&2; printf '%s\n' "$cls_edit" >&2; exit 1; }
+printf '%s\n' "$cls_edit" | grep -q 'REFUSED' || { echo "FAIL: the advance must be REFUSED" >&2; printf '%s\n' "$cls_edit" >&2; exit 1; }
+echo "   the failing package classified EDIT; the advance REFUSED"
+
+# ---------------------------------------------------------------------------
 # 3) verb:prune — reap merged-upstream worktrees + branches LIVE.
 # The fixture is a real repo whose `main` IS the merge base, with a merged
 # worktree/branch and an unmerged one; prune must remove the former and keep the
@@ -862,4 +904,4 @@ prune2_out="$(cd "$PRUNE2" && "$CH" task prune-run)" || { echo "FAIL: prune must
 [ -d "$PRUNE2/gap" ] || { echo "FAIL: the uninitialized submodule dir must remain" >&2; exit 1; }
 echo "   mode=prune completed cleanly; unmerged kept, merged reaped, uninitialized dir intact"
 
-echo "gate-task: PASS — command:task + all five maintenance verbs executed live against charly $CHARLY_REF"
+echo "gate-task: PASS — command:task + all six maintenance verbs executed live against charly $CHARLY_REF"

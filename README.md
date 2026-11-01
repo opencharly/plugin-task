@@ -17,11 +17,12 @@ compiled into charly.
 | `verb:file-parity` | `file-parity:` verb step | check / sync that paired files are byte-identical |
 | `verb:splice-region` | `splice-region:` verb step | splice a marked region from a fragment into a target |
 | `verb:module-pins` | `module-pins:` verb step | adopt a source go.mod's require pins across every module a glob matches, then tidy |
+| `verb:pin-closure` | `pin-closure:` verb step | resolve the TRANSITIVE CLOSURE of a pin advance: compile the composed set, classify every failing module BUMP (a published version already carries the fix) or EDIT (it does not), and iterate to a fixed point |
 | `verb:prune` | `prune:` verb step | garbage-collect MERGED-UPSTREAM session worktrees + branches across the project root and every submodule (a dry run by default) |
 
 ## Generic maintenance verbs
 
-The five maintenance verbs replace repository shell scripts. Each is **domain-neutral**
+The six maintenance verbs replace repository shell scripts. Each is **domain-neutral**
 and parameterized by the repo's OWN data (paths, pairs, pins) carried in its authored
 input, so the plugin stays reusable by any repository — no org name, repo name, or
 distro list is baked in. They are host-native: like the task engine they act on the

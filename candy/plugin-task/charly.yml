@@ -42,6 +42,7 @@ plugin-task:
                 - verb:file-parity
                 - verb:splice-region
                 - verb:module-pins
+                - verb:pin-closure
                 - verb:prune
             primary:
                 task: task
@@ -51,8 +52,8 @@ plugin-task:
               context:
                 - build
               command: "test -f plugin.go && test -f schema/task.cue && test -f params/cue_types_gen.go && echo 'plugin.go schema/task.cue params/cue_types_gen.go all present'"
-            - check: the provider source declares all eight capabilities (the three task classes individually + the five maintenance verbs) — a deterministic probe that fails if a capability is dropped
+            - check: the provider source declares all nine capabilities (the three task classes individually + the six maintenance verbs) — a deterministic probe that fails if a capability is dropped
               id: task-capabilities-declared
               context:
                 - build
-              command: "grep -q 'Class: \"kind\", Word: \"task\"' plugin.go && grep -q 'Class: \"command\", Word: \"task\"' plugin.go && grep -q 'Class: \"verb\", Word: \"task\"' plugin.go && grep -q 'Word: \"git-submodules\"' plugin.go && grep -q 'Word: \"file-parity\"' plugin.go && grep -q 'Word: \"splice-region\"' plugin.go && grep -q 'Word: \"module-pins\"' plugin.go && grep -q 'Word: \"prune\"' plugin.go && echo 'kind/command/verb:task + five maintenance verbs declared'"
+              command: "grep -q 'Class: \"kind\", Word: \"task\"' plugin.go && grep -q 'Class: \"command\", Word: \"task\"' plugin.go && grep -q 'Class: \"verb\", Word: \"task\"' plugin.go && grep -q 'Word: \"git-submodules\"' plugin.go && grep -q 'Word: \"file-parity\"' plugin.go && grep -q 'Word: \"splice-region\"' plugin.go && grep -q 'Word: \"module-pins\"' plugin.go && grep -q 'Word: \"pin-closure\"' plugin.go && grep -q 'Word: \"prune\"' plugin.go && echo 'kind/command/verb:task + six maintenance verbs declared'"

@@ -1,9 +1,9 @@
 # AGENTS.md — plugin-task
 
 Standalone plugin repo for the generic declarative TASK runner (`kind:task`,
-`command:task`, `verb:task`) plus five generic maintenance verbs
+`command:task`, `verb:task`) plus six generic maintenance verbs
 (`verb:git-submodules`, `verb:file-parity`, `verb:splice-region`,
-`verb:module-pins`, `verb:prune`). The Go module lives at `candy/plugin-task/` (module path
+`verb:module-pins`, `verb:pin-closure`, `verb:prune`). The Go module lives at `candy/plugin-task/` (module path
 `github.com/opencharly/plugin-task/candy/plugin-task`); the root `charly.yml`
 declares `discover: candy` so the repo is a project and its candy is scanned.
 
@@ -11,16 +11,16 @@ Canonical files:
 
 - `candy/plugin-task/charly.yml` — the `plugin-task:` candy entity (`plugin:`
   block, `plan:` checks).
-- `candy/plugin-task/plugin.go` — `NewProvider`/`NewMeta` and the seven
+- `candy/plugin-task/plugin.go` — `NewProvider`/`NewMeta` and the nine
   capability declarations.
 - `candy/plugin-task/grammar.go`, `graph.go`, `runner.go`, `incremental.go`,
   `verbs.go`, `cli.go` — the task engine, dependency graph, incremental
-  semantics, the five maintenance verbs, and the CLI.
+  semantics, the six maintenance verbs, and the CLI.
 - `candy/plugin-task/schema/task.cue` + `params/cue_types_gen.go` — the
   self-contained schema and its generated types.
 - `candy/plugin-task/cmd/serve/main.go` — the out-of-process serve shim.
 - `scripts/gate-task.sh` — the repo's own gate helper: builds a real charly binary
-  with this candy compiled in and drives `command:task` + the five maintenance
+  with this candy compiled in and drives `command:task` + the six maintenance
   verbs live.
 - `scripts/check-coherence.sh` — the control that charly's own `sdk`/`spec` pins
   lead this module's requires. Called by `gate-task.sh` (before its build) and by
@@ -59,7 +59,7 @@ when one is authored, add it here.
   `plugin:` block, CUE schema).
 - `scripts/gate-task.sh` at the repo root — the live gate: it clones charly at
   `CHARLY_REF` (default `main`), builds a binary with this candy compiled in, and
-  drives `command:task` plus the five maintenance verbs against real git fixtures.
+  drives `command:task` plus the six maintenance verbs against real git fixtures.
   It is the ONLY live execution of those verbs, so it must keep running.
 - CI runs two jobs besides the Go gates: `coherence` on every PR (seconds — the
   same `scripts/check-coherence.sh` control the gate runs, so the vintage-coherence
@@ -78,7 +78,7 @@ when one is authored, add it here.
 - The task body is the base-schema `#Task`, validated host-side against
   `#TaskValue`; keep the engine reusing `kit.RunPlan` + `checkkit.VerbResolver`
   over `kit.ShellExecutor{}` — there is no second execution engine.
-- The five maintenance verbs stay domain-neutral and parameterized by the repo's
+- The six maintenance verbs stay domain-neutral and parameterized by the repo's
   own data; never bake an org, repo, or distro name into the plugin.
 
 ## Landing
