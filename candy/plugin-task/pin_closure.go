@@ -187,6 +187,11 @@ func renderClosureReport(pair string, rungs []string, order []string, verdicts m
 
 // newestModuleVersion returns the newest published version of a module path and
 // the local dir of that version's sources (empty dir when it cannot be fetched).
+// newestModuleVersionFn is the version-lookup SEAM (a package-level var for the same reason the
+// report/classify seams exist): the loop's fixed-point iteration must be provable without a
+// registry, and a bump that is never adopted is the one arm a fixture cannot reach hermetically.
+var newestModuleVersionFn = newestModuleVersion
+
 func newestModuleVersion(anchorDir, module string) (string, string) {
 	out, err := runGo(anchorDir, "", "list", "-m", "-versions", module)
 	if err != nil {
@@ -291,7 +296,8 @@ func runPinClosure(projDir string, in params.PinClosureInput) (spec.Status, stri
 	members := []string{anchor}
 	members = append(members, in.Compose...)
 	replaces := map[string]string{}
-	workFile := writeOverlay(workDir, members, replaces)
+	goLine := workspaceGo(anchor)
+	workFile := writeOverlay(workDir, goLine, members, replaces)
 
 	rungs := []string{}
 	order := []string{}
@@ -317,7 +323,7 @@ func runPinClosure(projDir string, in params.PinClosureInput) (spec.Status, stri
 		rungs = append(rungs, fmt.Sprintf("%d: %d failing package(s)", rung, len(failures)))
 		adopted := 0
 		for _, f := range failures {
-			module := closureModule(f.Pkg)
+			module := moduleOf(anchor, workFile, f.Pkg)
 			if _, seen := verdicts[module]; seen {
 				continue
 			}
@@ -327,11 +333,11 @@ func runPinClosure(projDir string, in params.PinClosureInput) (spec.Status, stri
 			// consumer actually pins still carries the retired symbol. Classifying
 			// against the wrong one yields a FALSE BUMP — the dangerous direction,
 			// because it tells a reader to advance a pin where a cutover is owed.
-			version, dir := newestModuleVersion(anchor, f.Pkg)
+			version, dir := newestModuleVersionFn(anchor, module)
 			v := classifyClosure(retiredSymbols(f.Lines), dir, grepSymbol)
 			if v.Kind == "BUMP" {
 				v.Evidence = version + " — " + v.Evidence
-				replaces[module] = version // adopted: the workspace pins the newest version
+				replaces[module] = adoptionTarget(version, dir) // adopted by the workspace
 				adopted++
 			} else {
 				if len(f.Lines) > 0 {
@@ -346,13 +352,37 @@ func runPinClosure(projDir string, in params.PinClosureInput) (spec.Status, stri
 			rungs = append(rungs, fmt.Sprintf("%d: no member can be advanced by a pin bump — fixed point", rung))
 			return spec.StatusFail, renderClosureReport(pair, rungs, order, verdicts, edits)
 		}
-		workFile = writeOverlay(workDir, members, replaces)
+		workFile = writeOverlay(workDir, goLine, members, replaces)
 	}
 	return spec.StatusFail, renderClosureReport(pair, rungs, order, verdicts, edits)
 }
 
-// closureModule maps a failing package to the module a consumer would advance:
-// the package's own module path when it resolves, else its repo root (3 segments).
+// moduleOf maps a failing PACKAGE to the MODULE a consumer would advance, ASKED of the go
+// toolchain when it can answer: `go list -f {{.Module.Path}}` reports the module a package really
+// belongs to, which is what both the version lookup and the `replace` key must use — the same key
+// for both. closureModule is the fallback for a package the toolchain cannot resolve.
+func moduleOf(dir, workFile, pkg string) string {
+	if out, err := runGo(dir, workFile, "list", "-f", "{{.Module.Path}}", pkg); err == nil {
+		if m := strings.TrimSpace(out); m != "" && strings.Contains(m, "/") && !strings.Contains(m, " ") {
+			return m
+		}
+	}
+	return closureModule(pkg)
+}
+
+// adoptionTarget is what the workspace overlay replaces `module` WITH. A downloaded module dir is
+// preferred over its version: the source is already on disk (the version lookup fetched it), and a
+// version form would make the NEXT build re-resolve it — needing the network at build time and, for
+// a module the registry cannot serve, reintroducing exactly the failure this verb exists to find.
+func adoptionTarget(version, dir string) string {
+	if dir != "" {
+		return dir
+	}
+	return version
+}
+
+// closureModule is the RESOLUTION FALLBACK: the package's repo root, the first three path segments
+// (`host/org/repo`). It is used only when moduleOf cannot ask the toolchain.
 func closureModule(pkg string) string {
 	parts := strings.Split(pkg, "/")
 	if len(parts) > 3 {
@@ -407,9 +437,9 @@ func resolvedPair(anchor, prefix string) string {
 
 // writeOverlay writes the temp go.work naming the composed members (the anchor plus
 // whatever the caller or the loop has adopted).
-func writeOverlay(workDir string, members []string, replaces map[string]string) string {
+func writeOverlay(workDir, goLine string, members []string, replaces map[string]string) string {
 	var b strings.Builder
-	b.WriteString("go 1.26.4\n\nuse (\n")
+	b.WriteString("go " + goLine + "\n\nuse (\n")
 	for _, m := range members {
 		b.WriteString("\t" + m + "\n")
 	}
@@ -422,6 +452,10 @@ func writeOverlay(workDir string, members []string, replaces map[string]string) 
 		sort.Strings(mods)
 		b.WriteString("\nreplace (\n")
 		for _, m := range mods {
+			if strings.HasPrefix(replaces[m], "/") {
+				b.WriteString("\t" + m + " => " + replaces[m] + "\n")
+				continue
+			}
 			b.WriteString("\t" + m + " => " + m + " " + replaces[m] + "\n")
 		}
 		b.WriteString(")\n")
@@ -433,6 +467,24 @@ func writeOverlay(workDir string, members []string, replaces map[string]string) 
 
 // firstLines bounds a tool's own words for the Message: enough to see the cause,
 // never enough to swamp the report.
+// workspaceGo is the `go` line the generated workspace carries. It is the ANCHOR's own directive,
+// read from the module whose pins this verb resolves — a fixed literal over-constrains every closure
+// build to one toolchain (a module declaring go 1.24 built under a workspace demanding 1.26.4) and
+// fails outright on a host whose toolchain is older. It falls back to a conservative floor only when
+// the anchor's go.mod cannot be read.
+func workspaceGo(anchorDir string) string {
+	data, err := os.ReadFile(filepath.Join(anchorDir, "go.mod"))
+	if err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 2 && fields[0] == "go" {
+				return fields[1]
+			}
+		}
+	}
+	return "1.21"
+}
+
 func firstLines(s string, n int) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	if len(lines) > n {

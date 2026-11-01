@@ -8,8 +8,13 @@ package task
 // is tested against a case that happened rather than one that was imagined.
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/opencharly/plugin-task/candy/plugin-task/params"
+	"github.com/opencharly/spec/spec"
 )
 
 // ladderOutput is verbatim `go build ./...` output from the overlay probe: two
@@ -166,5 +171,105 @@ func TestGoFlagsWithoutMod(t *testing.T) {
 		if got := goFlagsWithoutMod(c.in); got != c.want {
 			t.Errorf("goFlagsWithoutMod(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// TestRunPinClosure_IteratesToAFixedPointAfterABump is the proof the BUMP arm runs — the arm the
+// live gate's two fixtures never reach, because both end at rung 1 with nothing adopted. It builds a
+// REAL three-module fixture on disk, so the loop is not simulated:
+//
+//	anchor (this project) requires example.com/org/repo/candy/dep, replaced at v0.1.0 with a source tree whose own
+//	package DOES NOT COMPILE ("undefined: retired"). The newest version's tree compiles.
+//
+// Rung 1 must classify the failure as BUMP (the symbol is absent from the newest source), ADOPT it
+// (write the replace into the workspace, keyed by the SAME module path the lookup used), re-compose
+// the overlay, and take a SECOND rung that compiles. A bump that is never adopted — the defect the
+// review named — fails this test at rung 1.
+func TestRunPinClosure_IteratesToAFixedPointAfterABump(t *testing.T) {
+	root := t.TempDir()
+	writeFile := func(rel, body string) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(p), err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+	writeFile("anchor/go.mod", "module example.com/anchor\n\ngo 1.24\n\nrequire example.com/org/repo/candy/dep v0.1.0\n\nreplace example.com/org/repo/candy/dep => ../depold\n")
+	writeFile("anchor/main.go", "package main\n\nimport \"example.com/org/repo/candy/dep\"\n\nfunc main() { dep.Fine() }\n")
+	// The pinned version's own package does not compile — the shape a retired symbol leaves behind.
+	writeFile("depold/go.mod", "module example.com/org/repo/candy/dep\n\ngo 1.24\n")
+	writeFile("depold/dep.go", "package dep\n\nfunc Fine() { retired() }\n")
+	// The newest published version carries the fix.
+	writeFile("depnew/go.mod", "module example.com/org/repo/candy/dep\n\ngo 1.24\n")
+	writeFile("depnew/dep.go", "package dep\n\nfunc Fine() {}\n")
+
+	anchor := filepath.Join(root, "anchor")
+	depNew := filepath.Join(root, "depnew")
+
+	orig := newestModuleVersionFn
+	newestModuleVersionFn = func(anchorDir, module string) (string, string) {
+		if module != "example.com/org/repo/candy/dep" {
+			t.Fatalf("the version lookup must be keyed on the MODULE the failing package belongs to, got %q", module)
+		}
+		return "v0.2.0", depNew
+	}
+	defer func() { newestModuleVersionFn = orig }()
+
+	status, msg := runPinClosure(root, params.PinClosureInput{Anchor: anchor})
+	if status != spec.StatusPass {
+		t.Fatalf("runPinClosure = %s, want PASS after the bump is adopted\n%s", status, msg)
+	}
+	for _, want := range []string{
+		"closure: BUMP",                  // the classification
+		"example.com/org/repo/candy/dep", // the module that was adopted, by its REAL path
+		"2: the composed set compiles",   // the SECOND rung: the iteration happened
+		"1: 1 failing package(s)",        // rung 1 saw the breakage
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("report must contain %q — it is the evidence the loop adopted and iterated\n%s", want, msg)
+		}
+	}
+}
+
+// TestWorkspaceGoDerivesTheFloorFromTheAnchor pins the `go` line of the generated workspace: the
+// anchor's own directive, never a literal, and a conservative floor only when it cannot be read.
+func TestWorkspaceGoDerivesTheFloorFromTheAnchor(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/x\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if got := workspaceGo(dir); got != "1.24" {
+		t.Errorf("workspaceGo = %q, want the anchor's own directive 1.24", got)
+	}
+	if got := workspaceGo(filepath.Join(dir, "missing")); got != "1.21" {
+		t.Errorf("workspaceGo(no go.mod) = %q, want the conservative floor 1.21", got)
+	}
+}
+
+// TestWriteOverlay_AdoptsADirOrAVersion pins both replace forms: a downloaded dir is used AS IS (no
+// version form, so the next build does not re-resolve it), a version is written in the module form.
+func TestWriteOverlay_AdoptsADirOrAVersion(t *testing.T) {
+	overlay := writeOverlay(t.TempDir(), "1.24", []string{"/src/anchor"}, map[string]string{
+		"example.com/by-dir":     "/cache/example.com/by-dir@v0.2.0",
+		"example.com/by-version": "v0.2.0",
+	})
+	data, err := os.ReadFile(overlay)
+	if err != nil {
+		t.Fatalf("read overlay: %v", err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		"go 1.24",
+		"example.com/by-dir => /cache/example.com/by-dir@v0.2.0",
+		"example.com/by-version => example.com/by-version v0.2.0",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("overlay must contain %q\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "go 1.26.4") {
+		t.Errorf("the workspace must not carry the retired hardcoded floor\n%s", got)
 	}
 }
