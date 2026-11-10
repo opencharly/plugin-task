@@ -3,13 +3,13 @@ module github.com/opencharly/plugin-task/candy/plugin-task
 go 1.26.8
 
 require (
+	cuelang.org/go v0.16.1
 	github.com/opencharly/sdk v0.2026297.1851
 	github.com/opencharly/spec v0.2026296.1036
 	golang.org/x/term v0.45.0
 )
 
 require (
-	cuelang.org/go v0.16.1 // indirect
 	github.com/alecthomas/kong v1.15.0 // indirect
 	github.com/cockroachdb/apd/v3 v3.2.1 // indirect
 	github.com/containerd/containerd/v2 v2.4.1 // indirect

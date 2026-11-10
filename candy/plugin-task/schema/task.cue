@@ -33,7 +33,7 @@
 	// OTHER question, which needs no checkout at all: whether each recorded pin is
 	// the value its owning repo actually serves (a green verify is not a currency
 	// claim; it passes on a tree whose submodules are all behind their remotes).
-	mode: "status" | "bump" | "verify" | "currency"
+	mode: or(_submodulesModeWord)
 	// pinned_from is a checkout path whose gitlinks are authoritative for the
 	// entries named in pin_map (e.g. "charly"). Empty => no pinned set.
 	pinned_from?: string @go(PinnedFrom)
@@ -72,7 +72,7 @@
 // #FileParityInput asserts (or syncs) that paired files are byte-identical.
 #FileParityInput: {
 	// mode: check fails on any drift; sync copies left -> right.
-	mode?: "check" | "sync"
+	mode?: or(_checkSyncWord)
 	// pairs are the compared file pairs, left = source of truth.
 	pairs: [...#FileParityPair]
 }
@@ -85,7 +85,7 @@
 // #SpliceRegionInput splices a marked region from a fragment into a target file.
 #SpliceRegionInput: {
 	// mode: sync writes; check exits non-zero on a stale target.
-	mode?: "sync" | "check"
+	mode?: or(_checkSyncWord)
 	// target is the file whose marked region is replaced.
 	target: string
 	// fragment is the file carrying the source region (must carry the markers).
@@ -114,7 +114,7 @@
 // module a glob matches, then tidies.
 #ModulePinsInput: {
 	// mode: sync edits+tidies; check only asserts.
-	mode?: "sync" | "check"
+	mode?: or(_checkSyncWord)
 	// source_go_mod is the go.mod whose require pins are the source of truth.
 	source_go_mod: string @go(SourceGoMod)
 	// glob is the directory glob (relative to the working dir) selecting modules.
@@ -134,7 +134,7 @@
 // target come from the authored input, never baked in (R3 / boundary law).
 #PruneInput: {
 	// mode: report lists what would be pruned (a dry run); prune performs it.
-	mode?: "report" | "prune"
+	mode?: or(_pruneModeWord)
 	// base is the merge target a branch must be merged into (default origin/main).
 	base?: string
 	// include_closed also prunes worktrees/branches whose PR is CLOSED (abandoned).
@@ -145,3 +145,22 @@
 	// misses it), so it prunes strictly less — never more.
 	local_only?: bool @go(LocalOnly)
 }
+
+// --- vocabulary tables (S3) --------------------------------------------------
+// Every closed set of words is a table keyed by word, and its word list is
+// derived from the table and used as `or()` of that list (§10.1 S3, D-PAT-3).
+// The table and the enum it feeds therefore cannot disagree, and a new word is
+// ONE row here. `@vocab` names the owner (§3.1): these sets are compiled into THIS
+// plugin, so the owner is the plugin's own word `task`.
+//
+// THREE tables cover FIVE `mode` fields: `_checkSync` is the one two-word set that
+// three verbs share, so it has ONE home and three consumers rather than three
+// copies that could drift apart.
+_submodulesMode: {status: {}, bump: {}, verify: {}, currency: {}} @vocab(task)
+_submodulesModeWord: [for w, _ in _submodulesMode {w}]
+
+_checkSync: {check: {}, sync: {}} @vocab(task)
+_checkSyncWord: [for w, _ in _checkSync {w}]
+
+_pruneMode: {report: {}, prune: {}} @vocab(task)
+_pruneModeWord: [for w, _ in _pruneMode {w}]
