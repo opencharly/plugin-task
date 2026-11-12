@@ -1,13 +1,23 @@
-// schema/task.cue — the SELF-CONTAINED CUE schema for plugin-task's authored
-// plugin_input. It defines ONLY the plugin's own input defs (command-level and
-// verb-level); the `kind:task` ENTITY body is the base-schema #Task, validated
-// host-side against #TaskValue (a task's `plan: [...#Step]` references the base
-// #Step grammar, which a self-contained plugin schema cannot carry — see
-// /charly-internals:plugin "Why self-contained schemas").
+// schema/task.cue — plugin-task's CUE schema: the authored plugin_input defs
+// (command-level and verb-level) AND the `kind: task` ENTITY body this plugin owns.
 //
-// SELF-CONTAINED: package-less and references NO base def (the load gate
-// compiles it standalone AND splices it onto the base), so it may use only
-// plain primitives.
+// THE KIND BODY LIVES HERE, not in the contract module: a `kind` body belongs with the
+// plugin that serves the kind. The `kind` capability declares the gate def (`plugin.go`:
+// `{Class: "kind", Word: "task", Validates: true, InputDef: "#TaskValue"}`), so the host
+// resolves `#TaskValue` from that DECLARATION and looks it up in the schema composed from
+// the base and every served plugin unit — no kernel change and no def-name knowledge in
+// the host. opencharly/spec#304 unit 2 moved it here; `spec/schema/task.cue` keeps only
+// `#TaskParamSpec`, which plugin-pipeline's `args:` shares and which therefore cannot
+// move.
+//
+// THE IMPORT RESOLVES OFFLINE. `#Task`'s `plan:` is the SAME `#Step`/`#Op` grammar a
+// candy plan uses, so this schema imports the contract module the way plugin-pipeline's
+// does: spec/schemacompose serves `github.com/opencharly/spec/schema` from the spec Go
+// module the binary already links — no network, no module cache, no `cue.mod`, no
+// published CUE module — on the serve side AND on the host side, which composes the SAME
+// body under the DERIVED module declaration.
+
+import "github.com/opencharly/spec/schema"
 
 // #TaskInput is the typed input for a `task:` verb step composed into
 // a candy/box/task plan (`- run: ... \n  task: {task: build}`), so a plan can
@@ -164,3 +174,82 @@ _checkSyncWord: [for w, _ in _checkSync {w}]
 
 _pruneMode: {report: {}, prune: {}} @vocab(task)
 _pruneModeWord: [for w, _ in _pruneMode {w}]
+
+// ---------------------------------------------------------------------------
+// The `kind: task` ENTITY body.
+//
+// A task is a named, host-native, REUSABLE plan — the SAME #Step grammar a candy's
+// `plan:` uses, plus task-level execution config (workdir, env, vars, incremental
+// staleness, dependencies, parameters). It is the declarative replacement for a repo
+// task-runner entry: any task a repository needs — build, test, lint, release,
+// verify, notify — is authored as a `task:` node in charly.yml and run with
+// `charly task <name>`.
+// ---------------------------------------------------------------------------
+
+// #Task — one generic task entity.
+//
+// The first three fields mirror the Go Task runner's authoring surface
+// (dir/env/vars/depends_on), the next block its incremental/staleness model
+// (sources/generates/status/preconditions), then the execution knobs
+// (silent/interactive/platforms/timeout/continue_on_error), then typed params,
+// and finally the ORDERED `plan:` — the reused #Step grammar whose steps run in
+// authored order on the host (or a venue the step selects).
+//
+// `description!` is required (the ADE identity contract every entity carries).
+// A `plan:` is optional in the schema; the plugin's own OpValidate requires at
+// least one step so `charly task <name>` has something to run.
+#Task: {
+	// --- identity (required: ADE) ---
+	description!: string & !=""
+
+	// --- execution context ---
+	// dir — the working directory every step runs in. Relative paths resolve
+	// against the task's project root (the directory holding charly.yml);
+	// ${VAR} references resolve against env/vars at run time.
+	dir?: string & !=""
+	// env — extra environment variables exported for the task's steps. PATH is
+	// reserved (use the shell profile); values are Go-coerced scalars.
+	env?: {PATH?: _|_, [string]: schema.#StrVal} @go(Env,type=map[string]string)
+	// vars — task-local ${VAR} substitution values (like a candy's var:), a
+	// build/run-time map of string values.
+	vars?: {[=~"^[A-Z_][A-Z0-9_]*$"]: schema.#StrVal} @go(Vars,type=map[string]string)
+
+	// --- dependencies ---
+	// depends_on — task names that must complete (in order) before this task
+	// runs. `charly task <name>` runs the closure; a cycle is a load error.
+	depends_on?: [...schema.#EntityRef] @go(DependsOn)
+
+	// --- incremental / staleness model (Go-Task parity) ---
+	// sources — glob paths whose modification invalidates the task.
+	sources?: [...string]
+	// generates — glob paths the task produces; if all are newer than every
+	// source, the task is considered up to date and skipped (unless --force).
+	generates?: [...string]
+	// status — up-to-date probe commands; each is a shell command whose exit 0
+	// marks the task up to date (all must pass for a skip).
+	status?: [...string]
+	// preconditions — shell commands that must exit 0 before the task runs; a
+	// failing precondition aborts the task (unlike status, which skips).
+	preconditions?: [...string]
+
+	// --- execution knobs ---
+	silent?:           bool
+	interactive?:      bool
+	platforms?:        [...string]
+	exclude_platforms?: [...string] @go(ExcludePlatforms)
+	timeout?:          schema.#Duration
+	continue_on_error?: bool @go(ContinueOnError)
+
+	// --- typed parameters ---
+	params?: {[string]: schema.#TaskParamSpec}
+
+	// --- the plan (the reused grammar) ---
+	plan?: [...schema.#Step]
+}
+
+// #TaskValue — the HOST-SIDE value gate def for the `task` kind (the #Candy /
+// #<Kind>Value analogue). @go(-): the Go type comes from #Task directly, so
+// this def is validation-only. Its NAME is the contract the `kind` capability
+// declares (plugin.go's InputDef), which is how the HOST resolves the gate for
+// this kind without carrying any knowledge of it.
+#TaskValue: #Task @go(-)

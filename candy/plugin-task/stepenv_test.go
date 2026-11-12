@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/opencharly/plugin-task/candy/plugin-task/params"
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/spec/spec"
@@ -48,15 +49,15 @@ func (r *envCapturingResolver) RunProvisionAct(_ context.Context, _ *spec.Op, _ 
 
 // captureStepEnv drives the REAL plan walk over a one-step task and returns the env
 // the step's verb received.
-func captureStepEnv(t *testing.T, task spec.Task, params map[string]string) (map[string]string, *runResult) {
+func captureStepEnv(t *testing.T, task params.Task, args map[string]string) (map[string]string, *runResult) {
 	t.Helper()
 	old := verbResolverFor
 	cap := &envCapturingResolver{}
 	verbResolverFor = func(*sdk.Executor) kit.VerbResolver { return cap }
 	defer func() { verbResolverFor = old }()
 
-	ts := &taskSet{dir: t.TempDir(), tasks: map[string]spec.Task{"t": task}}
-	res, err := runTask(context.Background(), nil, ts, "t", params, false, false)
+	ts := &taskSet{dir: t.TempDir(), tasks: map[string]params.Task{"t": task}}
+	res, err := runTask(context.Background(), nil, ts, "t", args, false, false)
 	if err != nil {
 		t.Fatalf("runTask: %v", err)
 	}
@@ -75,7 +76,7 @@ func captureStepEnv(t *testing.T, task spec.Task, params map[string]string) (map
 // reachable BY NAME (opencharly/plugin-task#34).
 func TestNewTaskRunner_ExportsTheTasksResolvedValues(t *testing.T) {
 	dir := t.TempDir()
-	task := spec.Task{
+	task := params.Task{
 		Description: "d",
 		Vars:        map[string]string{"UPPER": "from-vars"},
 		Env:         map[string]string{"TASKENV": "from-env"},
@@ -105,7 +106,7 @@ func TestNewTaskRunner_ExportsTheTasksResolvedValues(t *testing.T) {
 // the step's env was empty, so this value reached the step nowhere at all.
 func TestRunTask_StepEnvCarriesAParamAsData(t *testing.T) {
 	evil := `$(touch /tmp/r1-repro/PWNED) "double" 'single' $HOME; rm -rf /`
-	env, _ := captureStepEnv(t, spec.Task{
+	env, _ := captureStepEnv(t, params.Task{
 		Description: "d",
 		Plan:        []spec.Step{{Run: "x", Op: spec.Op{Plugin: "command", PluginInput: map[string]any{"command": "true"}}}},
 	}, map[string]string{"out": evil})
@@ -124,7 +125,7 @@ func TestRunTask_StepEnvCarriesAParamAsData(t *testing.T) {
 // step and the host's value is a default. The second param proves the channel is
 // ON at all — a test that asserts only the collision would also pass with no channel.
 func TestRunTask_StepsOwnEnvWinsOnACollision(t *testing.T) {
-	env, _ := captureStepEnv(t, spec.Task{
+	env, _ := captureStepEnv(t, params.Task{
 		Description: "d",
 		Plan: []spec.Step{{Run: "x", Op: spec.Op{
 			Plugin:      "command",
@@ -164,7 +165,7 @@ func TestRunTask_StdinBytesAreNotExported(t *testing.T) {
 		_ = r.Close()
 	}()
 
-	task := spec.Task{
+	task := params.Task{
 		Description: "d",
 		Plan: []spec.Step{{Run: "x", Op: spec.Op{
 			Plugin:      "command",
@@ -200,7 +201,7 @@ func TestRunTask_StdinBytesAreNotExported(t *testing.T) {
 // an environment variable, and a value that vanishes silently reads exactly like a
 // host that never supplied it.
 func TestRunTask_NonExportableNameIsDisclosed(t *testing.T) {
-	_, res := captureStepEnv(t, spec.Task{
+	_, res := captureStepEnv(t, params.Task{
 		Description: "d",
 		Plan:        []spec.Step{{Run: "x", Op: spec.Op{Plugin: "command", PluginInput: map[string]any{"command": "true"}}}},
 	}, map[string]string{"my-param": "value"})

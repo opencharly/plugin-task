@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/opencharly/plugin-task/candy/plugin-task/params"
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/sdk/workflowkit"
@@ -16,19 +17,19 @@ import (
 )
 
 // mkTask builds a minimal task entity for tests.
-func mkTask(desc string, deps ...string) spec.Task {
-	return spec.Task{Description: desc, DependsOn: deps, Plan: []spec.Step{{Run: "noop", Op: spec.Op{Command: "true"}}}}
+func mkTask(desc string, deps ...string) params.Task {
+	return params.Task{Description: desc, DependsOn: deps, Plan: []spec.Step{{Run: "noop", Op: spec.Op{Command: "true"}}}}
 }
 
 // TestClosure_DependencyFirst proves depends_on is resolved dependency-first and
 // deduplicated.
 func TestClosure_DependencyFirst(t *testing.T) {
-	ts := &taskSet{tasks: map[string]spec.Task{
+	ts := &taskSet{tasks: map[string]params.Task{
 		"a": mkTask("a", "b"),
 		"b": mkTask("b", "c"),
 		"c": mkTask("c"),
 	}}
-	order, err := workflowkit.Closure(ts.tasks, []string{"a"})
+	order, err := closure(ts.tasks, []string{"a"})
 	if err != nil {
 		t.Fatalf("closure: %v", err)
 	}
@@ -45,19 +46,19 @@ func TestClosure_DependencyFirst(t *testing.T) {
 
 // TestClosure_Cycle proves a dependency cycle is a hard error.
 func TestClosure_Cycle(t *testing.T) {
-	ts := &taskSet{tasks: map[string]spec.Task{
+	ts := &taskSet{tasks: map[string]params.Task{
 		"a": mkTask("a", "b"),
 		"b": mkTask("b", "a"),
 	}}
-	if _, err := workflowkit.Closure(ts.tasks, []string{"a"}); err == nil {
+	if _, err := closure(ts.tasks, []string{"a"}); err == nil {
 		t.Fatal("a dependency cycle must be a hard error")
 	}
 }
 
 // TestClosure_Unknown proves an unknown dependency is a hard error.
 func TestClosure_Unknown(t *testing.T) {
-	ts := &taskSet{tasks: map[string]spec.Task{"a": mkTask("a", "missing")}}
-	if _, err := workflowkit.Closure(ts.tasks, []string{"a"}); err == nil {
+	ts := &taskSet{tasks: map[string]params.Task{"a": mkTask("a", "missing")}}
+	if _, err := closure(ts.tasks, []string{"a"}); err == nil {
 		t.Fatal("an unknown dependency must be a hard error")
 	}
 }
@@ -81,15 +82,15 @@ func TestParseArgs(t *testing.T) {
 
 // TestPlatformSkip proves the platform gate.
 func TestPlatformSkip(t *testing.T) {
-	skip := spec.Task{Platforms: []string{"plan9"}}
+	skip := params.Task{Platforms: []string{"plan9"}}
 	if platformSkip(skip) == "" {
 		t.Fatal("a task restricted to plan9 must skip on linux")
 	}
-	ok := spec.Task{Platforms: []string{"linux"}}
+	ok := params.Task{Platforms: []string{"linux"}}
 	if platformSkip(ok) != "" {
 		t.Fatal("a linux task must not skip on linux")
 	}
-	excl := spec.Task{ExcludePlatforms: []string{"linux"}}
+	excl := params.Task{ExcludePlatforms: []string{"linux"}}
 	if platformSkip(excl) == "" {
 		t.Fatal("a linux-excluded task must skip on linux")
 	}
@@ -135,12 +136,12 @@ func TestExpandVars(t *testing.T) {
 // TestResolveParams proves declared defaults fill CLI gaps and required params are
 // enforced.
 func TestResolveParams(t *testing.T) {
-	task := spec.Task{Params: map[string]spec.TaskParamSpec{
+	task := params.Task{Params: map[string]spec.TaskParamSpec{
 		"WITH_DEFAULT": {Default: "d"},
 		"REQUIRED":     {Required: true},
 	}}
 	// CLI override wins; default fills the other.
-	got, err := workflowkit.ResolveArgs(task, map[string]string{"REQUIRED": "r", "WITH_DEFAULT": "cli"})
+	got, err := resolveArgs(task, map[string]string{"REQUIRED": "r", "WITH_DEFAULT": "cli"})
 	if err != nil {
 		t.Fatalf("ResolveArgs: %v", err)
 	}
@@ -148,12 +149,12 @@ func TestResolveParams(t *testing.T) {
 		t.Fatalf("ResolveArgs = %v", got)
 	}
 	// Default applies when not overridden.
-	got, err = workflowkit.ResolveArgs(task, map[string]string{"REQUIRED": "r"})
+	got, err = resolveArgs(task, map[string]string{"REQUIRED": "r"})
 	if err != nil || got["WITH_DEFAULT"] != "d" {
 		t.Fatalf("default not applied: %v (%v)", got, err)
 	}
 	// A missing required param errors.
-	if _, err := workflowkit.ResolveArgs(task, nil); err == nil {
+	if _, err := resolveArgs(task, nil); err == nil {
 		t.Fatal("a missing required param must error")
 	}
 }
@@ -161,7 +162,7 @@ func TestResolveParams(t *testing.T) {
 // TestRunTask_ContinueOnError proves the flag is carried onto the result so the CLI
 // can honor it (a failed step under continue_on_error does not fail the run).
 func TestRunTask_ContinueOnError(t *testing.T) {
-	ts := &taskSet{dir: t.TempDir(), tasks: map[string]spec.Task{
+	ts := &taskSet{dir: t.TempDir(), tasks: map[string]params.Task{
 		"t": {Description: "c", ContinueOnError: true, Plan: []spec.Step{{Run: "x", Op: spec.Op{Command: "true"}}}},
 	}}
 	res, err := runTask(context.Background(), nil, ts, "t", nil, false, true)
@@ -176,7 +177,7 @@ func TestRunTask_ContinueOnError(t *testing.T) {
 // TestRunTask_Silent proves silent is carried onto the result (the CLI suppresses the
 // per-step lines for it).
 func TestRunTask_Silent(t *testing.T) {
-	ts := &taskSet{dir: t.TempDir(), tasks: map[string]spec.Task{
+	ts := &taskSet{dir: t.TempDir(), tasks: map[string]params.Task{
 		"t": {Description: "s", Silent: true, Plan: []spec.Step{{Run: "x", Op: spec.Op{Command: "true"}}}},
 	}}
 	res, err := runTask(context.Background(), nil, ts, "t", nil, false, true)
@@ -191,7 +192,7 @@ func TestRunTask_Silent(t *testing.T) {
 // TestRunTask_InteractiveNoTTY proves an interactive task refuses to run without a TTY
 // (test stdin is not a terminal).
 func TestRunTask_InteractiveNoTTY(t *testing.T) {
-	ts := &taskSet{dir: t.TempDir(), tasks: map[string]spec.Task{
+	ts := &taskSet{dir: t.TempDir(), tasks: map[string]params.Task{
 		"t": {Description: "i", Interactive: true, Plan: []spec.Step{{Run: "x", Op: spec.Op{Command: "true"}}}},
 	}}
 	res, err := runTask(context.Background(), nil, ts, "t", nil, false, false)
@@ -228,7 +229,7 @@ func hasErrDiag(t *testing.T, reply *pb.InvokeReply) bool {
 // TestRunTask_PreconditionAborts proves a failing precondition aborts the task
 // (status "error"), never a silent skip.
 func TestRunTask_PreconditionAborts(t *testing.T) {
-	ts := &taskSet{dir: t.TempDir(), tasks: map[string]spec.Task{
+	ts := &taskSet{dir: t.TempDir(), tasks: map[string]params.Task{
 		"t": {Description: "p", Preconditions: []string{"false"}, Plan: []spec.Step{{Run: "x", Op: spec.Op{Command: "true"}}}},
 	}}
 	res, err := runTask(context.Background(), nil, ts, "t", nil, false, false)
@@ -242,7 +243,7 @@ func TestRunTask_PreconditionAborts(t *testing.T) {
 
 // TestRunTask_StatusUpToDate proves the status probe short-circuits to up-to-date.
 func TestRunTask_StatusUpToDate(t *testing.T) {
-	ts := &taskSet{dir: t.TempDir(), tasks: map[string]spec.Task{
+	ts := &taskSet{dir: t.TempDir(), tasks: map[string]params.Task{
 		"t": {Description: "s", Status: []string{"true"}, Plan: []spec.Step{{Run: "x", Op: spec.Op{Command: "true"}}}},
 	}}
 	res, err := runTask(context.Background(), nil, ts, "t", nil, false, false)
@@ -256,7 +257,7 @@ func TestRunTask_StatusUpToDate(t *testing.T) {
 
 // TestRunTask_ForceBypassesStatus proves --force bypasses the status short-circuit.
 func TestRunTask_ForceBypassesStatus(t *testing.T) {
-	ts := &taskSet{dir: t.TempDir(), tasks: map[string]spec.Task{
+	ts := &taskSet{dir: t.TempDir(), tasks: map[string]params.Task{
 		"t": {Description: "s", Status: []string{"true"}, Plan: []spec.Step{{Run: "x", Op: spec.Op{Command: "true"}}}},
 	}}
 	res, err := runTask(context.Background(), nil, ts, "t", nil, true, true)
@@ -311,7 +312,7 @@ func TestRunTask_DrivesRealPlan(t *testing.T) {
 	defer func() { verbResolverFor = old }()
 	before, _ := os.Getwd()
 
-	ts := &taskSet{dir: dir, tasks: map[string]spec.Task{
+	ts := &taskSet{dir: dir, tasks: map[string]params.Task{
 		"t": {
 			Description: "two-step plan",
 			Dir:         "sub",
@@ -344,7 +345,7 @@ func TestRunTask_TalliesFailure(t *testing.T) {
 	verbResolverFor = func(*sdk.Executor) kit.VerbResolver { return &fakeResolver{status: spec.StatusFail} }
 	defer func() { verbResolverFor = old }()
 
-	ts := &taskSet{dir: t.TempDir(), tasks: map[string]spec.Task{
+	ts := &taskSet{dir: t.TempDir(), tasks: map[string]params.Task{
 		"t": {Description: "f", Plan: []spec.Step{{Run: "x", Op: spec.Op{Plugin: "command", PluginInput: map[string]any{"command": "false"}}}}},
 	}}
 	res, err := runTask(context.Background(), nil, ts, "t", nil, false, false)

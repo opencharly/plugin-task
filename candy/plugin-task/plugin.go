@@ -1,7 +1,7 @@
 // Package task is the generic declarative task runner for charly. It provides:
 //
 //   - kind:task     — a named, host-native, REUSABLE plan authored as a
-//     `task:` node in charly.yml (the base-schema #Task, host-value-gated).
+//     `task:` node in charly.yml (THIS plugin's #Task, host-value-gated).
 //   - command:task  — `charly task [list] [<name>] [--dry-run] [--json]
 //     [--param k=v] [--all]`, the executor.
 //   - verb:task     — composes a declared task into a candy/box/task plan.
@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/opencharly/plugin-task/candy/plugin-task/params"
 	"github.com/opencharly/sdk"
 	pb "github.com/opencharly/spec/proto"
 	"github.com/opencharly/spec/spec"
@@ -33,20 +34,22 @@ const calver = "2026.267.1200"
 
 // entityCache holds the kind:task entity bodies the loader decoded (OpLoad),
 // keyed by entity name — the command reads them here (same process, no reparse).
-var entityCache = map[string]spec.Task{}
+var entityCache = map[string]params.Task{}
 
 // NewProvider returns the task provider (all three capabilities).
 func NewProvider() pb.ProviderServer { return &provider{} }
 
-// NewMeta advertises the three capabilities + the self-contained CUE schema. The
-// kind capability is Validates:true so the host dispatches OpValidate (the
-// CONCRETE gate closing the required-field gap the closedness-only host value
-// gate leaves). No InputDef on the kind capability: the entity body is the base
-// #Task/#TaskValue, validated host-side (a self-contained plugin schema cannot
-// carry `plan: [...#Step]`).
+// NewMeta advertises the three capabilities + this plugin's CUE schema. The kind
+// capability is Validates:true so the host dispatches OpValidate (the CONCRETE gate
+// closing the required-field gap the closedness-only host value gate leaves), and it
+// DECLARES InputDef "#TaskValue": the entity body is THIS plugin's CUE def, read from the
+// schema composed from the base and every served plugin unit. Without the declaration the
+// host has no way to know the def's name for this kind and would route the node to the
+// flat plugin-input path (which is concrete, not closedness-only) — the body's move and
+// this declaration are one change, never two.
 func NewMeta() pb.PluginMetaServer {
 	return sdk.NewMeta(calver, []sdk.ProvidedCapability{
-		{Class: "kind", Word: "task", Validates: true},
+		{Class: "kind", Word: "task", Validates: true, InputDef: "#TaskValue"},
 		{Class: "verb", Word: "task", InputDef: "#TaskInput", Primary: "task"},
 		{Class: "command", Word: "task"},
 		// The five generic, domain-neutral maintenance verbs (each parameterized by
@@ -93,10 +96,11 @@ func (p *provider) Invoke(ctx context.Context, req *pb.InvokeRequest) (*pb.Invok
 }
 
 // invokeLoad decodes + caches the authored kind:task body. The host has already
-// validated the body against #TaskValue (closedness); concreteness is enforced
-// by invokeValidate.
+// validated the body against THIS plugin's #TaskValue (closedness, resolved from the
+// input def this plugin's kind capability declares); concreteness is enforced by
+// invokeValidate.
 func invokeLoad(req *pb.InvokeRequest) (*pb.InvokeReply, error) {
-	var body spec.Task
+	var body params.Task
 	if len(req.GetParamsJson()) > 0 {
 		if err := json.Unmarshal(req.GetParamsJson(), &body); err != nil {
 			return nil, fmt.Errorf("task entity decode: %w", err)
@@ -119,7 +123,7 @@ func invokeLoad(req *pb.InvokeRequest) (*pb.InvokeReply, error) {
 // loaded set is intentionally NOT checked here — the entity may reference a task
 // loaded later — the runner surfaces an unknown dependency at run time).
 func invokeValidate(req *pb.InvokeRequest) (*pb.InvokeReply, error) {
-	var body spec.Task
+	var body params.Task
 	if len(req.GetParamsJson()) > 0 {
 		if err := json.Unmarshal(req.GetParamsJson(), &body); err != nil {
 			return nil, fmt.Errorf("task validate decode: %w", err)

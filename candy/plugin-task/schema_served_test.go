@@ -24,8 +24,8 @@ import (
 	"testing"
 
 	"cuelang.org/go/cue"
-	"cuelang.org/go/cue/cuecontext"
 	pb "github.com/opencharly/spec/proto"
+	"github.com/opencharly/spec/schemacompose"
 )
 
 // vocabHarness LIFTS the hidden vocabulary tables and their derived word lists into one
@@ -100,9 +100,9 @@ func servedSchema(t *testing.T) cue.Value {
 	if body == "" {
 		t.Fatal("Describe served an EMPTY CUE body")
 	}
-	v := cuecontext.New().CompileString(body + vocabHarness)
-	if err := v.Err(); err != nil {
-		t.Fatalf("served schema does not compile: %v", err)
+	v, err := schemacompose.ServedText(nil, body+vocabHarness)
+	if err != nil {
+		t.Fatalf("served schema does not compose: %v", err)
 	}
 	return v
 }
@@ -308,13 +308,13 @@ func TestATableWordReachesItsField(t *testing.T) {
 		t.Fatalf("Describe: %v", err)
 	}
 	body := caps.GetSchemaCue()
-	ctx := cuecontext.New()
 	const extra = "zzz-gained-word"
 	for _, p := range vocabProbes {
-		v := ctx.CompileString(appendTableRow(t, body, p.label, extra))
-		if err := v.Err(); err != nil {
-			t.Fatalf("%s: the body with a row added to %s does not compile: %v", p.table, p.label, err)
+		v, err := schemacompose.ServedText(nil, appendTableRow(t, body, p.label, extra))
+		if err != nil {
+			t.Fatalf("%s: the body with a row added to %s does not compose: %v", p.table, p.label, err)
 		}
+		ctx := v.Context()
 		if err := v.Unify(ctx.CompileString(p.use(extra))).Err(); err != nil {
 			t.Errorf("%s does not accept %q after %s gained that row — the field is NOT derived from the table, it only happens to agree with it today: %v", p.field, extra, p.label, err)
 		}

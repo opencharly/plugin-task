@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/opencharly/plugin-task/candy/plugin-task/params"
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/spec/spec"
@@ -29,7 +30,7 @@ import (
 // (authored `skip: true` — the plan runner's own StatusSkip path) and one step that
 // passes.
 func skippedTaskSet(dir, name string) *taskSet {
-	return &taskSet{dir: dir, tasks: map[string]spec.Task{
+	return &taskSet{dir: dir, tasks: map[string]params.Task{
 		name: {Description: "a task with a step that ran nothing", Plan: []spec.Step{
 			{
 				Run: "the step that ran nothing",
@@ -179,7 +180,7 @@ func TestRunTaskCLI_SkippedStepExitsZero(t *testing.T) {
 	defer func() { verbResolverFor = old }()
 
 	oldCache := entityCache
-	entityCache = map[string]spec.Task{
+	entityCache = map[string]params.Task{
 		"mixed": {Description: "a task with a step that ran nothing", Plan: []spec.Step{
 			{
 				Run: "the step that ran nothing",
