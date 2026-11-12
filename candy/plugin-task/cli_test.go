@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/opencharly/plugin-task/candy/plugin-task/params"
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/spec/spec"
@@ -35,7 +36,7 @@ func TestRunTaskCLI_OutputMode(t *testing.T) {
 	defer func() { verbResolverFor = oldResolver }()
 
 	oldCache := entityCache
-	entityCache = map[string]spec.Task{
+	entityCache = map[string]params.Task{
 		"capture": {Description: "produce a value", Plan: []spec.Step{
 			{Run: "produce a value", Op: spec.Op{Plugin: "command", PluginInput: map[string]any{"command": "true"}}},
 		}},
@@ -173,7 +174,7 @@ func TestNestedFailure_TopLevelNotEnriched(t *testing.T) {
 	}
 	defer func() { verbResolverFor = old }()
 
-	ts := &taskSet{dir: t.TempDir(), tasks: map[string]spec.Task{
+	ts := &taskSet{dir: t.TempDir(), tasks: map[string]params.Task{
 		"t": {Description: "f", Plan: []spec.Step{
 			{Run: "the leaf step", Op: spec.Op{Plugin: "command", PluginInput: map[string]any{"command": "false"}}},
 		}},

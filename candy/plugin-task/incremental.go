@@ -7,8 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/opencharly/sdk/workflowkit"
-	"github.com/opencharly/spec/spec"
+	"github.com/opencharly/plugin-task/candy/plugin-task/params"
 )
 
 // incremental.go — the Go-Task staleness model (sources/generates/status) and the
@@ -20,8 +19,8 @@ import (
 //   - sources/generates: every generated path exists AND is newer than every source.
 //
 // An absent signal is not "up to date" (a task with no status/sources always runs).
-func taskUpToDate(ctx context.Context, dir string, t spec.Task, params map[string]string) (bool, string) {
-	env := workflowkit.MergedEnv(t, params)
+func taskUpToDate(ctx context.Context, dir string, t params.Task, params map[string]string) (bool, string) {
+	env := mergedEnv(t, params)
 	if len(t.Status) > 0 {
 		allOK := true
 		for _, cmd := range t.Status {
@@ -81,7 +80,7 @@ func generatesNewerThanSources(dir string, sources, generates []string) (bool, s
 // platformSkip returns a non-empty reason when the task does not apply to the
 // current OS (runtime.GOOS). Both platforms and exclude_platforms are honored; an
 // empty platforms list means "all platforms".
-func platformSkip(t spec.Task) string {
+func platformSkip(t params.Task) string {
 	goos := runtime.GOOS
 	if len(t.Platforms) > 0 && !contains(t.Platforms, goos) {
 		return fmt.Sprintf("platform %q not in %v", goos, t.Platforms)

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/opencharly/plugin-task/candy/plugin-task/params"
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/spec/spec"
@@ -43,7 +44,7 @@ func hopTaskSet(dir, name string, steps ...string) *taskSet {
 			Op:  spec.Op{Plugin: "command", PluginInput: map[string]any{"command": "true"}},
 		})
 	}
-	return &taskSet{dir: dir, tasks: map[string]spec.Task{
+	return &taskSet{dir: dir, tasks: map[string]params.Task{
 		name: {Description: "the nested task", Plan: plan},
 	}}
 }
@@ -157,7 +158,7 @@ func TestHopTasks_FailurePathUnchanged(t *testing.T) {
 // TestHopTasks_UnknownTaskIsAFailure proves the hop's own errors still fail loud with
 // the reason (the closure error), rather than degrading into a PASS.
 func TestHopTasks_UnknownTaskIsAFailure(t *testing.T) {
-	ts := &taskSet{dir: t.TempDir(), tasks: map[string]spec.Task{}}
+	ts := &taskSet{dir: t.TempDir(), tasks: map[string]params.Task{}}
 
 	st, msg := hopTasks(context.Background(), nil, ts, "nope", nil)
 	if st != spec.StatusFail {

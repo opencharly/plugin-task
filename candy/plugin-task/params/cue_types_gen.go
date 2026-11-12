@@ -2,6 +2,10 @@
 
 package params
 
+import (
+	"github.com/opencharly/spec/spec"
+)
+
 // #TaskInput is the typed input for a `task:` verb step composed into
 // a candy/box/task plan (`- run: ... \n  task: {task: build}`), so a plan can
 // invoke another declared task.
@@ -150,4 +154,75 @@ type PruneInput struct {
 	// squash-merged branch whose remote ref still survives (git ancestry alone
 	// misses it), so it prunes strictly less — never more.
 	LocalOnly bool `yaml:"local_only,omitempty" json:"local_only,omitempty"`
+}
+
+// #Task — one generic task entity.
+//
+// The first three fields mirror the Go Task runner's authoring surface
+// (dir/env/vars/depends_on), the next block its incremental/staleness model
+// (sources/generates/status/preconditions), then the execution knobs
+// (silent/interactive/platforms/timeout/continue_on_error), then typed params,
+// and finally the ORDERED `plan:` — the reused #Step grammar whose steps run in
+// authored order on the host (or a venue the step selects).
+//
+// `description!` is required (the ADE identity contract every entity carries).
+// A `plan:` is optional in the schema; the plugin's own OpValidate requires at
+// least one step so `charly task <name>` has something to run.
+type Task struct {
+	// --- identity (required: ADE) ---
+	Description string `yaml:"description,omitempty" json:"description"`
+
+	// --- execution context ---
+	// dir — the working directory every step runs in. Relative paths resolve
+	// against the task's project root (the directory holding charly.yml);
+	// ${VAR} references resolve against env/vars at run time.
+	Dir string `yaml:"dir,omitempty" json:"dir,omitempty"`
+
+	// env — extra environment variables exported for the task's steps. PATH is
+	// reserved (use the shell profile); values are Go-coerced scalars.
+	Env map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+
+	// vars — task-local ${VAR} substitution values (like a candy's var:), a
+	// build/run-time map of string values.
+	Vars map[string]string `yaml:"vars,omitempty" json:"vars,omitempty"`
+
+	// --- dependencies ---
+	// depends_on — task names that must complete (in order) before this task
+	// runs. `charly task <name>` runs the closure; a cycle is a load error.
+	DependsOn []spec.EntityRef `yaml:"depends_on,omitempty" json:"depends_on,omitempty"`
+
+	// --- incremental / staleness model (Go-Task parity) ---
+	// sources — glob paths whose modification invalidates the task.
+	Sources []string `yaml:"sources,omitempty" json:"sources,omitempty"`
+
+	// generates — glob paths the task produces; if all are newer than every
+	// source, the task is considered up to date and skipped (unless --force).
+	Generates []string `yaml:"generates,omitempty" json:"generates,omitempty"`
+
+	// status — up-to-date probe commands; each is a shell command whose exit 0
+	// marks the task up to date (all must pass for a skip).
+	Status []string `yaml:"status,omitempty" json:"status,omitempty"`
+
+	// preconditions — shell commands that must exit 0 before the task runs; a
+	// failing precondition aborts the task (unlike status, which skips).
+	Preconditions []string `yaml:"preconditions,omitempty" json:"preconditions,omitempty"`
+
+	// --- execution knobs ---
+	Silent bool `yaml:"silent,omitempty" json:"silent,omitempty"`
+
+	Interactive bool `yaml:"interactive,omitempty" json:"interactive,omitempty"`
+
+	Platforms []string `yaml:"platforms,omitempty" json:"platforms,omitempty"`
+
+	ExcludePlatforms []string `yaml:"exclude_platforms,omitempty" json:"exclude_platforms,omitempty"`
+
+	Timeout spec.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+
+	ContinueOnError bool `yaml:"continue_on_error,omitempty" json:"continue_on_error,omitempty"`
+
+	// --- typed parameters ---
+	Params map[string]spec.TaskParamSpec `yaml:"params,omitempty" json:"params,omitempty"`
+
+	// --- the plan (the reused grammar) ---
+	Plan []spec.Step `yaml:"plan,omitempty" json:"plan,omitempty"`
 }

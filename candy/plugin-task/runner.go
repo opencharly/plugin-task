@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/opencharly/plugin-task/candy/plugin-task/params"
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/checkkit"
 	"github.com/opencharly/sdk/kit"
@@ -29,7 +30,7 @@ import (
 
 // taskSet is the name→task map a run resolves against, plus the project dir.
 type taskSet struct {
-	tasks map[string]spec.Task
+	tasks map[string]params.Task
 	dir   string
 }
 
@@ -38,7 +39,7 @@ type taskSet struct {
 // A nil executor (out-of-process, no reverse channel) falls back to the OpLoad
 // cache; an absent/empty project yields an empty set.
 func loadTaskSet(ctx context.Context, ex *sdk.Executor) (*taskSet, error) {
-	ts := &taskSet{tasks: map[string]spec.Task{}}
+	ts := &taskSet{tasks: map[string]params.Task{}}
 	dir, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("resolve cwd: %w", err)
@@ -56,7 +57,7 @@ func loadTaskSet(ctx context.Context, ex *sdk.Executor) (*taskSet, error) {
 	}
 	if ok && uf != nil {
 		for name, raw := range uf.PluginKinds["task"] {
-			var t spec.Task
+			var t params.Task
 			if jerr := json.Unmarshal(raw, &t); jerr != nil {
 				return nil, fmt.Errorf("task %q: decode: %w", name, jerr)
 			}
@@ -92,11 +93,11 @@ type runResult struct {
 // the CLI), honoring the platform gate, preconditions, the incremental staleness
 // model, the interactive guard, and the task timeout. It never recurses into
 // depends_on. params is the RESOLVED parameter set (declared defaults overlaid with
-// CLI overrides — see workflowkit.ResolveArgs).
+// CLI overrides — see resolveArgs).
 func runTask(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, params map[string]string, force, dryRun bool) (*runResult, error) {
 	t, ok := ts.tasks[name]
 	if !ok {
-		return nil, fmt.Errorf("unknown task %q (declared tasks: %s)", name, strings.Join(workflowkit.SortedNames(ts.tasks), ", "))
+		return nil, fmt.Errorf("unknown task %q (declared tasks: %s)", name, strings.Join(sortedNames(ts.tasks), ", "))
 	}
 	res := &runResult{Name: name, ContinueOnError: t.ContinueOnError, Silent: t.Silent}
 
@@ -115,11 +116,11 @@ func runTask(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, pa
 		return res, nil
 	}
 
-	dir := workflowkit.ResolveTaskDir(ts.dir, t.Dir, workflowkit.MergedEnv(t, params))
+	dir := workflowkit.ResolveTaskDir(ts.dir, t.Dir, mergedEnv(t, params))
 
 	// preconditions — a failing precondition ABORTS (never a silent skip).
 	for _, pc := range t.Preconditions {
-		if code, err := runHostShell(ctx, dir, workflowkit.MergedEnv(t, params), pc); err != nil || code != 0 {
+		if code, err := runHostShell(ctx, dir, mergedEnv(t, params), pc); err != nil || code != 0 {
 			res.Status = "error"
 			res.Message = fmt.Sprintf("precondition failed: %s (exit %d)", pc, code)
 			return res, nil
@@ -227,8 +228,8 @@ var verbResolverFor = func(ex *sdk.Executor) kit.VerbResolver {
 //
 // It also returns the stdinCapture whose temp file the caller MUST remove once the
 // walk is done (runTask defers stdin.cleanup()).
-func newTaskRunner(ex *sdk.Executor, projDir string, t spec.Task, params map[string]string) (*kit.Runner, stdinCapture) {
-	env := workflowkit.MergedEnv(t, params)
+func newTaskRunner(ex *sdk.Executor, projDir string, t params.Task, params map[string]string) (*kit.Runner, stdinCapture) {
+	env := mergedEnv(t, params)
 	env["TASK_DIR"] = workflowkit.ResolveTaskDir(projDir, t.Dir, env)
 	// The DATA channel — the task's RESOLVED values as the step's process environment.
 	//
@@ -317,7 +318,7 @@ func (c stdinCapture) cleanup() {
 // The whole plan is scanned rather than an enumerated field list: the walk expands
 // ${NAME} over every string field of every step (kit.ExpandOpVars), and re-stating that
 // field list here would be a second copy of it to drift (R3).
-func taskConsumesStdin(t spec.Task) bool {
+func taskConsumesStdin(t params.Task) bool {
 	b, err := json.Marshal(t.Plan)
 	if err != nil {
 		// A plan that will not marshal cannot have declared the vars, and the walk

@@ -10,7 +10,6 @@ import (
 
 	"github.com/opencharly/plugin-task/candy/plugin-task/params"
 	"github.com/opencharly/sdk"
-	"github.com/opencharly/sdk/workflowkit"
 	pb "github.com/opencharly/spec/proto"
 	"github.com/opencharly/spec/spec"
 )
@@ -51,9 +50,9 @@ func runTaskCLI(ctx context.Context, ex *sdk.Executor, args []string) error {
 
 	names := []string{opts.name}
 	if opts.all {
-		names = workflowkit.SortedNames(ts.tasks)
+		names = sortedNames(ts.tasks)
 	}
-	order, err := workflowkit.Closure(ts.tasks, names)
+	order, err := closure(ts.tasks, names)
 	if err != nil {
 		return err
 	}
@@ -62,7 +61,7 @@ func runTaskCLI(ctx context.Context, ex *sdk.Executor, args []string) error {
 	for _, n := range order {
 		// Resolve the task's params (declared defaults <- CLI overrides) BEFORE the
 		// run, so required-param errors surface up front.
-		resolved, perr := workflowkit.ResolveArgs(ts.tasks[n], opts.params)
+		resolved, perr := resolveArgs(ts.tasks[n], opts.params)
 		if perr != nil {
 			return fmt.Errorf("task %q: %w", n, perr)
 		}
@@ -170,7 +169,7 @@ func parseArgs(args []string) (cliOpts, error) {
 }
 
 func printList(ts *taskSet, asJSON bool) error {
-	names := workflowkit.SortedNames(ts.tasks)
+	names := sortedNames(ts.tasks)
 	if asJSON {
 		type item struct {
 			Name        string   `json:"name"`
@@ -353,14 +352,14 @@ func invokeOpRun(ctx context.Context, req *pb.InvokeRequest) (*pb.InvokeReply, e
 // after the call site regressed to the bare aggregate, so the hop's own composition
 // lives here — and is driven here.
 func hopTasks(ctx context.Context, ex *sdk.Executor, ts *taskSet, name string, cli map[string]string) (spec.Status, string) {
-	order, cerr := workflowkit.Closure(ts.tasks, []string{name})
+	order, cerr := closure(ts.tasks, []string{name})
 	if cerr != nil {
 		return spec.StatusFail, cerr.Error()
 	}
 	ran, failed, skipped := 0, 0, 0
 	var steps []spec.StepResult
 	for _, n := range order {
-		resolved, perr := workflowkit.ResolveArgs(ts.tasks[n], cli)
+		resolved, perr := resolveArgs(ts.tasks[n], cli)
 		if perr != nil {
 			return spec.StatusFail, fmt.Sprintf("task %q: %v", n, perr)
 		}

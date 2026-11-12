@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/opencharly/plugin-task/candy/plugin-task/params"
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/spec/spec"
@@ -126,7 +127,7 @@ func TestRunTask_RecordsStdinTruncation(t *testing.T) {
 
 	// The plan must reference TASK_STDIN: stdin is read only for a task that can
 	// observe it (taskConsumesStdin), and this test is about a task that does.
-	ts := &taskSet{dir: t.TempDir(), tasks: map[string]spec.Task{
+	ts := &taskSet{dir: t.TempDir(), tasks: map[string]params.Task{
 		"t": {Description: "d", Plan: []spec.Step{{Run: "x", Op: spec.Op{Plugin: "command", PluginInput: map[string]any{"command": "printf %s \"$TASK_STDIN\" | wc -c"}}}}},
 	}}
 	res, err := runTask(context.Background(), nil, ts, "t", nil, false, false)
@@ -145,18 +146,18 @@ func TestRunTask_RecordsStdinTruncation(t *testing.T) {
 // whose writer is never closed: an unconditional read would block here forever, so the
 // test completing at all IS the assertion (it is bounded by the go test timeout).
 func TestTaskConsumesStdin_GatesTheRead(t *testing.T) {
-	step := func(cmd string) spec.Task {
-		return spec.Task{Description: "d", Plan: []spec.Step{{Run: "x", Op: spec.Op{Plugin: "command", PluginInput: map[string]any{"command": cmd}}}}}
+	step := func(cmd string) params.Task {
+		return params.Task{Description: "d", Plan: []spec.Step{{Run: "x", Op: spec.Op{Plugin: "command", PluginInput: map[string]any{"command": cmd}}}}}
 	}
 	for _, tc := range []struct {
 		name string
-		task spec.Task
+		task params.Task
 		want bool
 	}{
 		{"TASK_STDIN", step("cat \"$TASK_STDIN_FILE\""), true},
 		{"TASK_STDIN_FILE", step("test -f \"$TASK_STDIN_FILE\""), true},
 		{"neither", step("echo hello"), false},
-		{"empty plan", spec.Task{Description: "d"}, false},
+		{"empty plan", params.Task{Description: "d"}, false},
 	} {
 		if got := taskConsumesStdin(tc.task); got != tc.want {
 			t.Errorf("taskConsumesStdin(%s) = %v, want %v", tc.name, got, tc.want)

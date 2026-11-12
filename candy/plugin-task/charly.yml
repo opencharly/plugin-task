@@ -11,9 +11,11 @@ plugin-task:
             checkkit.VerbResolver over kit.ShellExecutor{} — the SAME engine
             candy/plugin-check drives — so there is no second execution engine. Any task
             a repository needs (build, test, lint, release, verify, notify) is a task
-            entity; the task body is the base-schema #Task, validated host-side against
-            #TaskValue (a task's `plan: [...#Step]` references the base #Step grammar,
-            which a self-contained plugin schema cannot carry).
+            entity; the task body is THIS plugin's CUE (`schema/task.cue`: `#Task`,
+            host-validated against `#TaskValue`, which the `kind` capability declares as
+            its `InputDef`). The schema imports the contract module for the SHARED
+            `#Step`/#Op grammar, `#StrVal`, `#Duration`, `#EntityRef` and
+            `#TaskParamSpec`, so a task's `plan:` cannot disagree with a candy plan's.
 
             Five GENERIC, domain-neutral MAINTENANCE verbs replace repository shell
             scripts, each parameterized by the repo's own data (paths/pairs/pins) so the
@@ -56,4 +58,4 @@ plugin-task:
               id: task-capabilities-declared
               context:
                 - build
-              command: "grep -q 'Class: \"kind\", Word: \"task\"' plugin.go && grep -q 'Class: \"command\", Word: \"task\"' plugin.go && grep -q 'Class: \"verb\", Word: \"task\"' plugin.go && grep -q 'Word: \"git-submodules\"' plugin.go && grep -q 'Word: \"file-parity\"' plugin.go && grep -q 'Word: \"splice-region\"' plugin.go && grep -q 'Word: \"module-pins\"' plugin.go && grep -q 'Word: \"pin-closure\"' plugin.go && grep -q 'Word: \"prune\"' plugin.go && echo 'kind/command/verb:task + six maintenance verbs declared'"
+              command: "grep -q 'Class: \"kind\", Word: \"task\", Validates: true, InputDef: \"#TaskValue\"' plugin.go && grep -q 'Class: \"command\", Word: \"task\"' plugin.go && grep -q 'Class: \"verb\", Word: \"task\"' plugin.go && grep -q 'Word: \"git-submodules\"' plugin.go && grep -q 'Word: \"file-parity\"' plugin.go && grep -q 'Word: \"splice-region\"' plugin.go && grep -q 'Word: \"module-pins\"' plugin.go && grep -q 'Word: \"pin-closure\"' plugin.go && grep -q 'Word: \"prune\"' plugin.go && echo 'kind/command/verb:task + six maintenance verbs declared'"

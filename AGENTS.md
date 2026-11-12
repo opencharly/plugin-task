@@ -13,9 +13,10 @@ Canonical files:
   block, `plan:` checks).
 - `candy/plugin-task/plugin.go` — `NewProvider`/`NewMeta` and the nine
   capability declarations.
-- `candy/plugin-task/grammar.go`, `graph.go`, `runner.go`, `incremental.go`,
-  `verbs.go`, `cli.go` — the task engine, dependency graph, incremental
-  semantics, the six maintenance verbs, and the CLI.
+- `candy/plugin-task/grammar.go`, `closure.go`, `resolve.go`, `runner.go`,
+  `incremental.go`, `verbs.go`, `cli.go` — the task engine, the depends_on closure
+  and the param/env resolution (both typed on the task body, so both live with it),
+  incremental semantics, the six maintenance verbs, and the CLI.
 - `candy/plugin-task/schema/task.cue` + `params/cue_types_gen.go` — the
   self-contained schema and its generated types.
 - `candy/plugin-task/cmd/serve/main.go` — the out-of-process serve shim.
@@ -75,8 +76,12 @@ when one is authored, add it here.
 - Edit the `plugin-task:` candy entity, the Go source, and `schema/task.cue`
   **together** — the schema is the single source for the `params/` struct, so a
   field change not mirrored in the schema desyncs the generated types.
-- The task body is the base-schema `#Task`, validated host-side against
-  `#TaskValue`; keep the engine reusing `kit.RunPlan` + `checkkit.VerbResolver`
+- The task body is THIS repo's `schema/task.cue` (`#Task`, host-validated against
+  `#TaskValue`), and the `kind` capability DECLARES that def as its `InputDef`;
+  the body, its `params/` regeneration, and the `InputDef` are ONE change. The
+  schema imports `github.com/opencharly/spec/schema` for the shared `#Step`/#Op
+  grammar, `#StrVal`, `#Duration`, `#EntityRef` and `#TaskParamSpec` — those stay
+  contract defs. Keep the engine reusing `kit.RunPlan` + `checkkit.VerbResolver`
   over `kit.ShellExecutor{}` — there is no second execution engine.
 - The six maintenance verbs stay domain-neutral and parameterized by the repo's
   own data; never bake an org, repo, or distro name into the plugin.
