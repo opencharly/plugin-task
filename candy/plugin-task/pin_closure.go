@@ -311,7 +311,14 @@ func runPinClosure(projDir string, in params.PinClosureInput) (spec.Status, stri
 	verdicts := map[string]closureVerdict{}
 	edits := []string{}
 	for rung := 1; rung <= closureMaxRungs; rung++ {
-		out, buildErr := runGo(anchor, workFile, "build", "./...")
+		// ⚑ `-buildvcs=false` is part of the fix, not a test convenience. The closure composes
+		// SCRATCH modules under a temp dir; `go build`'s default VCS stamping then asks git for a
+		// status in a tree that is not a repository, and a git that cannot answer (exit 128) fails
+		// the whole build with `error obtaining VCS status` — measured in this repo's own suite
+		// when the harness temp dir sits somewhere git resolves differently, and the tool's own
+		// message names this flag as the remedy. There is nothing to stamp here: the closure
+		// composes a module set, it does not build a repository's source.
+		out, buildErr := runGo(anchor, workFile, "build", "-buildvcs=false", "./...")
 		failures := parseClosureFailures(out)
 		if buildErr != nil && len(failures) == 0 {
 			// The build failed for a reason this parser cannot attribute to a module
