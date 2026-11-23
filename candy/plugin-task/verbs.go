@@ -239,6 +239,57 @@ func remoteBranchSHA(projDir, url, branch string) string {
 	return f[0]
 }
 
+// remoteTagIndex maps every tag's PEELED commit to one tag name, from `git ls-remote --tags`
+// — the ONE remote tag read in this file (opencharly/opencharly#793). An annotated tag's ref
+// points at a TAG OBJECT, so the peeled `<ref>^{}` line is preferred exactly as
+// resolveUpstreamRef prefers it; comparing a commit against a tag object would report every
+// annotated tag as pointing nowhere.
+//
+// Empty on failure, and the caller then reports "no tag at served" for that repo — the same
+// thing it says for a repo with no tags. That is deliberate: the tag fact is commentary on a
+// pin, never a judge of it, so an unreachable remote must not turn the currency VERDICT red a
+// second time for a question the verdict does not rest on.
+func remoteTagIndex(projDir, url string) map[string]string {
+	idx := make(map[string]string)
+	if strings.TrimSpace(url) == "" {
+		return idx
+	}
+	out, _, exit := hostCapture(context.Background(), projDir, "git ls-remote --tags "+shellQuote(url))
+	if exit != 0 {
+		return idx
+	}
+	type ent struct{ name, sha, peeled string }
+	byName := make(map[string]*ent)
+	var order []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 || !strings.HasPrefix(f[1], "refs/tags/") {
+			continue
+		}
+		name := strings.TrimPrefix(f[1], "refs/tags/")
+		if base, ok := strings.CutSuffix(name, "^{}"); ok {
+			if e := byName[base]; e != nil {
+				e.peeled = f[0]
+			}
+			continue
+		}
+		byName[name] = &ent{name: name, sha: f[0]}
+		order = append(order, name)
+	}
+	sort.Strings(order)
+	for _, name := range order {
+		e := byName[name]
+		sha := e.sha
+		if e.peeled != "" {
+			sha = e.peeled
+		}
+		if _, seen := idx[sha]; !seen {
+			idx[sha] = e.name
+		}
+	}
+	return idx
+}
+
 // resolveSubmoduleURL returns the URL a path's pin is read from: the url declared in
 // `.gitmodules`, with a RELATIVE url resolved against the SUPERPROJECT's own origin —
 // the same resolution git itself performs, because a relative submodule url means "a
@@ -961,6 +1012,10 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		}
 		type pin struct {
 			path, intent, recorded, served, which, state string
+			// tag is the tag that points at the SERVED commit, empty when none does
+			// (opencharly/opencharly#793). It is a FACT reported beside the pin, never the
+			// gate's verdict: `design-pintag` owns the states that explain an untagged pin.
+			tag string
 		}
 		type classified struct {
 			pin
@@ -1007,6 +1062,24 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		// objects cannot tell the two apart; the honest report is the class plus the one remedy
 		// that is right for both — advance the pin, which is what `task sync` does.
 		squashWhy := "a squash-merged branch advances without descending from its previous head, and a hand-pin looks identical; advance the pin either way"
+		// The TAG fact (opencharly/opencharly#793): whether a tag points at the SERVED commit,
+		// which the report never said — so a body could call a pin "merged and tagged" with no
+		// part of the answer disagreeing. Asked once per URL (every pin of one repo shares the
+		// answer) and reported as a FACT, never as a verdict: `design-pintag` owns the states
+		// that explain an untagged pin (a CHANGELOG tip one commit above its tag, a recorded
+		// exception), and this report must not grow a second policy.
+		tagIdx := map[string]map[string]string{}
+		tagAt := func(url, sha string) string {
+			if url == "" || sha == "" {
+				return ""
+			}
+			idx, ok := tagIdx[url]
+			if !ok {
+				idx = remoteTagIndex(projDir, url)
+				tagIdx[url] = idx
+			}
+			return idx[sha]
+		}
 		var rows []classified
 		var structural []string
 		stateOf := map[string]string{}
@@ -1151,6 +1224,12 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 				}
 				served, which := resolveUpstreamRef(projDir, url, refOf(intent))
 				r.served, r.which = served, which
+				if which == "tag" {
+					// The intent named the tag itself, so that tag IS the fact.
+					r.tag = refOf(intent)
+				} else {
+					r.tag = tagAt(url, served)
+				}
 				switch {
 				case served == "":
 					r.state = "ref-not-served"
@@ -1393,6 +1472,13 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 			if r.which != "" {
 				d += " (" + r.which + ")"
 			}
+			if r.leaf && r.served != "" {
+				if r.tag != "" {
+					d += "; tag " + r.tag
+				} else {
+					d += "; no tag at served"
+				}
+			}
 			detail = append(detail, d)
 		}
 
@@ -1418,6 +1504,23 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		}
 		head := fmt.Sprintf("currency: %d of %d pin(s) NOT current [%s]; intents: %d upstream leaf/leaves (%d implicit), %d derived-from edge(s)",
 			notCur, len(rows), strings.Join(tally, ", "), leaves, implicit, derived)
+		// The tag tally answers the question even when nothing is behind: a run that read
+		// "0 NOT current" said nothing about tags, which is how "merged and tagged" survived.
+		leafTagged, leafUntagged := 0, 0
+		for _, r := range rows {
+			if !r.leaf || r.served == "" {
+				continue
+			}
+			if r.tag != "" {
+				leafTagged++
+			} else {
+				leafUntagged++
+			}
+		}
+		if leafTagged+leafUntagged > 0 {
+			head += fmt.Sprintf("; tags at served: %d of %d leaf pin(s) (%d without — a CHANGELOG tip sits one commit above its tag, which design-pintag judges)",
+				leafTagged, leafTagged+leafUntagged, leafUntagged)
+		}
 		if len(detail) > 0 {
 			head += "; NOT CURRENT: " + strings.Join(detail, "; ")
 		}

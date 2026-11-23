@@ -581,3 +581,42 @@ func TestGitSubmodules_CurrencyStalenessBoundsNeglect(t *testing.T) {
 		t.Fatalf("a readable history must not be reported as unreadable; got:\n%s", msg)
 	}
 }
+
+// TestGitSubmodules_CurrencyNamesTheTagAtTheServedCommit pins opencharly/opencharly#793: the
+// report named each pin's SERVED commit and never whether a TAG pointed at it, so a body could
+// call a pin "merged and tagged" with no part of the answer disagreeing. The fact is now stated
+// per pin and tallied over the leaves, so an all-current run answers the tag question too.
+func TestGitSubmodules_CurrencyNamesTheTagAtTheServedCommit(t *testing.T) {
+	tmp := t.TempDir()
+	dir, run, c1, c2, _ := curSuper(t, tmp)
+	curRecord(t, dir, "src", c1) // behind its main: it appears in the NOT CURRENT detail
+	curRecord(t, dir, "d", c2)
+	run("commit", "-qm", "src behind, d current")
+
+	// Arm 1 — no tag exists anywhere. The report STATES the absence; it never stays silent.
+	st, msg := runMaintenanceVerbIn(dir, "git-submodules", map[string]any{"mode": "currency"})
+	if st != spec.StatusPass {
+		t.Fatalf("a reachable advance must still pass: %s: %s", st, msg)
+	}
+	if !strings.Contains(msg, "; no tag at served") {
+		t.Fatalf("the report must say a pin's served commit is untagged, got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "tags at served: 0 of 2 leaf pin(s) (2 without") {
+		t.Fatalf("the tally must answer the tag question for the whole tree, got:\n%s", msg)
+	}
+
+	// Arm 2 — an ANNOTATED tag on the served commit. The peeled `<ref>^{}` line is what must
+	// match: a comparison against the tag OBJECT would report this pin as untagged.
+	curGit(t, "-C", filepath.Join(tmp, "up"), "tag", "-a", "v9.9.9", "-m", "release", c2)
+
+	st, msg = runMaintenanceVerbIn(dir, "git-submodules", map[string]any{"mode": "currency"})
+	if st != spec.StatusPass {
+		t.Fatalf("tagging a commit cannot fail the currency verdict: %s: %s", st, msg)
+	}
+	if !strings.Contains(msg, "; tag v9.9.9") {
+		t.Fatalf("an annotated tag at the served commit must be named (peeled form), got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "tags at served: 2 of 2 leaf pin(s) (0 without") {
+		t.Fatalf("the tally must count both pins tagged at served, got:\n%s", msg)
+	}
+}
