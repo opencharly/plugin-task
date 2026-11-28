@@ -581,6 +581,55 @@ if printf '%s\n' "$nosrc_out" | grep -q 'did not roll'; then
 fi
 echo "   the refusal named the missing checkout and the materialize command; the stale diagnosis is gone"
 
+echo "== ff REFUSES a non-fast-forward (leaf) =="
+# THE HAZARD THE GUARD CLOSES, driven live: a submodule checkout carrying a LOCAL commit
+# that makes it diverge from its branch tip. `git switch --detach <tip>` would exit 0 and
+# leave that commit in ZERO refs (the reflog alone), so `ff` must refuse instead — and
+# leave the checkout AND the superproject's recorded gitlink exactly as they were.
+. "$FIX/shas"
+REFUSE="$FIX/refuse"; mkdir -p "$REFUSE"
+(
+  cd "$REFUSE" && git init -q -b main
+  echo u > u.txt && git add -A && G commit -qm u
+  printf '[submodule "leaf"]\n\tpath = leaf\n\turl = %s\n\tbranch = main\n' "$FIX/subsrc" > .gitmodules
+  git add .gitmodules && G commit -qm gm
+  git update-index --add --cacheinfo "160000,$C1,leaf" && G commit -qm "pin leaf stale"
+  git -c protocol.file.allow=always submodule update --init -q leaf
+)
+# The checkout moves to the served tip C2 and commits a LOCAL change on top: HEAD now
+# descends from C2, so a move to C2 is a rewind and NOT a fast-forward.
+(
+  cd "$REFUSE/leaf"
+  git switch -q --detach "$C2"
+  echo local > local-work && git add local-work && G commit -qm "local work"
+)
+REFUSE_HEAD="$(git -C "$REFUSE/leaf" rev-parse HEAD)"
+REFUSE_PIN="$(git -C "$REFUSE" ls-files -s leaf | awk '{print $2}')"
+cat > "$REFUSE/charly.yml" <<'YML'
+ff-refuse:
+  task:
+    description: fast-forward a submodule whose checkout diverged from its branch tip
+    dir: .
+    plan:
+      - run: fast-forward
+        git-submodules: {mode: ff}
+        context: [deploy]
+YML
+if refuse_out="$(cd "$REFUSE" && "$CH" task ff-refuse 2>&1)"; then
+  echo "FAIL: an ff over a diverged checkout must FAIL, not pass the run" >&2
+  printf '%s\n' "$refuse_out" >&2; exit 1
+fi
+printf '%s\n' "$refuse_out" | sed 's/^/   | /'
+printf '%s\n' "$refuse_out" | grep -q 'refused to move leaf' || {
+  echo "FAIL: the refusal must name the path; got: $refuse_out" >&2; exit 1; }
+printf '%s\n' "$refuse_out" | grep -q 'a fast-forward only advances' || {
+  echo "FAIL: the refusal must name the direction; got: $refuse_out" >&2; exit 1; }
+[ "$(git -C "$REFUSE/leaf" rev-parse HEAD)" = "$REFUSE_HEAD" ] || {
+  echo "FAIL: the refused checkout MOVED (was ${REFUSE_HEAD:0:9}) — a refusal must leave it as it was" >&2; exit 1; }
+[ "$(git -C "$REFUSE" ls-files -s leaf | awk '{print $2}')" = "$REFUSE_PIN" ] || {
+  echo "FAIL: the refused pin was STAGED (was ${REFUSE_PIN:0:9}) — no partial write is allowed" >&2; exit 1; }
+echo "   refused; checkout at ${REFUSE_HEAD:0:9} unchanged, recorded gitlink at ${REFUSE_PIN:0:9} unchanged"
+
 echo "== verb:git-submodules ff ORDER (pinned_from is itself rolled first) =="
 . "$FIX/order"; . "$FIX/leafshas"
 (cd "$FIX/umb2" && "$CH" task order-ff) | grep -q '0 failed' || { echo "FAIL: order-ff did not run" >&2; exit 1; }

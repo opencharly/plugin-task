@@ -1,6 +1,7 @@
 package task
 
 import (
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -46,6 +47,17 @@ func TestGitSubmodules_FFReconcilesNestedCheckouts(t *testing.T) {
 	gitIn(t, outer, "add", "inner")
 	gitIn(t, outer, "commit", "-qm", "inner=L2")
 	o2 := strings.TrimSpace(gitIn(t, outer, "rev-parse", "HEAD"))
+	// THE FIXTURE PROPERTY THE COMMENT CLAIMS — and the ff guard REQUIRES. pinSubmodule
+	// refuses a move whose target is not a descendant of the checkout's HEAD, so a fixture
+	// where O1 were NOT an ancestor of O2 would exercise the REFUSAL and never the
+	// reconcile this gate is about. Assert the property instead of assuming it: O2 must be
+	// exactly one commit above O1, and `merge-base --is-ancestor o1 o2` must exit 0.
+	if n := strings.TrimSpace(gitIn(t, outer, "rev-list", "--count", o1+".."+o2)); n != "1" {
+		t.Fatalf("fixture: O2 %s must be exactly ONE commit above O1 %s (the comment claims O1 is one commit BEHIND O2), got %s commit(s) in o1..o2", o2, o1, n)
+	}
+	if out, err := exec.Command("git", "-C", outer, "merge-base", "--is-ancestor", o1, o2).CombinedOutput(); err != nil {
+		t.Fatalf("fixture: O1 %s is NOT an ancestor of O2 %s, but the comment above claims it is and the ff guard (pinSubmodule's merge-base --is-ancestor check) requires it: %v\n%s", o1, o2, err, out)
+	}
 	outerBare := filepath.Join(base, "outer.git")
 	gitIn(t, base, "clone", "-q", "--bare", outer, outerBare)
 
