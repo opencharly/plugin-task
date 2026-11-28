@@ -65,7 +65,7 @@ func TestRunTaskCLI_OutputMode(t *testing.T) {
 // has no field for nested steps. Pre-fix it passed the bare "N step(s) failed", so a
 // composite task failed with no path and no reason — the leaf's own message existed at
 // the top level and was destroyed exactly at the hop. That made a real umbrella
-// `task sync` failure (sync -> pins -> git-submodules over ~424 submodules) transient
+// `ff` failure (ff -> pins -> git-submodules over ~424 submodules) transient
 // and permanently un-diagnosable.
 //
 // This test drives nestedVerdict — the function the hop's loop ACTUALLY calls — so it
@@ -81,7 +81,7 @@ func TestNestedVerdict_CarriesTheStepReason(t *testing.T) {
 		Steps: []spec.StepResult{
 			{
 				Keyword: "run",
-				Text:    "bump the pins (charly rolls first)",
+				Text:    "advance the pins (charly rolls first)",
 				Result: spec.CheckResult{
 					Status:  spec.StatusFail,
 					Message: "exit=2, want 0 (stderr: index.lock exists)",
@@ -103,7 +103,7 @@ func TestNestedVerdict_CarriesTheStepReason(t *testing.T) {
 		t.Fatalf("the nested verdict must still lead with the count, got:\n%s", got)
 	}
 	// The PATH to the failure: the failing step's keyword + authored text.
-	if !strings.Contains(got, "[fail] run — bump the pins (charly rolls first)") {
+	if !strings.Contains(got, "[fail] run — advance the pins (charly rolls first)") {
 		t.Fatalf("the nested verdict must name the failing step's path, got:\n%s", got)
 	}
 	// The REASON: the leaf step's own message, which is the whole point of the fix.

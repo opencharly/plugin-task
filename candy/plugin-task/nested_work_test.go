@@ -12,7 +12,7 @@ import (
 // that pins `outer` at O1, `outer` that pins its own `inner` at L1, and BOTH levels
 // initialized — the shape `git clone --recurse-submodules` produces.
 //
-// `outer`'s main is at O2, the commit that records `inner` at L2, so the bump ROLLS
+// `outer`'s main is at O2, the commit that records `inner` at L2, so `ff` ROLLS
 // outer and the reconcile then moves the nested checkout from L1 to L2. The nested
 // checkout is given L2 locally, the way a real nested remote would serve it.
 //
@@ -31,7 +31,7 @@ import (
 // and the SHAs the assertions speak about.
 func nestedWorkFixture(t *testing.T) (umb, innerCo, leafCo, o1, l1, l2 string) {
 	t.Helper()
-	base, leafBare, _, L1, L2 := bumpOrigins(t)
+	base, leafBare, _, L1, L2 := ffOrigins(t)
 
 	outer := filepath.Join(base, "outer-src")
 	gitIn(t, base, "init", "-q", "-b", "main", "outer-src")
@@ -45,7 +45,7 @@ func nestedWorkFixture(t *testing.T) (umb, innerCo, leafCo, o1, l1, l2 string) {
 	gitIn(t, outer, "update-index", "--add", "--cacheinfo", "160000,"+L1+",inner")
 	gitIn(t, outer, "commit", "-qm", "inner=L1")
 	o1 = gitIn(t, outer, "rev-parse", "HEAD")
-	// Advance inner to L2 inside outer: that is the commit the bump rolls outer to.
+	// Advance inner to L2 inside outer: that is the commit `ff` rolls outer to.
 	gitIn(t, outer, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "inner")
 	gitIn(t, filepath.Join(outer, "inner"), "fetch", "-q", "origin")
 	gitIn(t, filepath.Join(outer, "inner"), "switch", "--quiet", "--detach", L2)
@@ -86,7 +86,7 @@ func nestedWorkFixture(t *testing.T) (umb, innerCo, leafCo, o1, l1, l2 string) {
 	return umb, innerCo, leafCo, o1, L1, L2
 }
 
-// TestGitSubmodules_BumpRefusesToDropNestedWork is opencharly/plugin-task#54's gate.
+// TestGitSubmodules_FFRefusesToDropNestedWork is opencharly/plugin-task#54's gate.
 //
 // THE DEFECT: the reconcile moves the nested checkouts with `git submodule update
 // --recursive`, and that update takes a nested checkout off the commit it is at — even
@@ -95,20 +95,20 @@ func nestedWorkFixture(t *testing.T) (umb, innerCo, leafCo, o1, l1, l2 string) {
 // 2.56: the same update refuses a DIRTY nested checkout loudly, so the loss is not
 // git's doing but the update's blind spot.
 //
-// THE ASSERTION: the bump REFUSES, it NAMES the nested checkout, and it leaves THE
+// THE ASSERTION: `ff` REFUSES, it NAMES the nested checkout, and it leaves THE
 // REFUSED SUBMODULE exactly as it was — the nested checkout still holds the operator's
 // commit, the superproject's pin was NOT staged, and the submodule's own checkout was
-// not switched. A bump that refuses is the only outcome that loses nothing.
+// not switched. An `ff` that refuses is the only outcome that loses nothing.
 //
-// The scope is PER-SUBMODULE, and deliberately so: the bump collects per-path failures
+// The scope is PER-SUBMODULE, and deliberately so: `ff` collects per-path failures
 // and continues (opencharly/plugin-task#13), so a sibling that sorts AFTER the refused
 // one still rolls. The sibling's roll is asserted by
-// TestGitSubmodules_BumpRefusalIsScopedToTheRefusedSubmodule, and this fixture carries
+// TestGitSubmodules_FFRefusalIsScopedToTheRefusedSubmodule, and this fixture carries
 // that sibling so the scope is visible here too.
 //
-// Before the fix this FAILS: the bump PASSES and the nested checkout is moved off the
+// Before the fix this FAILS: `ff` PASSES and the nested checkout is moved off the
 // operator's commit, with nothing reported.
-func TestGitSubmodules_BumpRefusesToDropNestedWork(t *testing.T) {
+func TestGitSubmodules_FFRefusesToDropNestedWork(t *testing.T) {
 	umb, innerCo, _, o1, _, _ := nestedWorkFixture(t)
 
 	// The operator's work: a commit in the nested checkout that NO ref references —
@@ -121,9 +121,9 @@ func TestGitSubmodules_BumpRefusesToDropNestedWork(t *testing.T) {
 		t.Fatalf("fixture: the local commit must be referenced by no ref, got %q", out)
 	}
 
-	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "ff"})
 	if st != spec.StatusFail {
-		t.Fatalf("the bump must REFUSE a nested checkout whose commit the update would drop, got %s: %s", st, msg)
+		t.Fatalf("`ff` must REFUSE a nested checkout whose commit the update would drop, got %s: %s", st, msg)
 	}
 	if !strings.Contains(msg, "outer/inner") {
 		t.Fatalf("the refusal must NAME the nested checkout, got: %s", msg)
@@ -140,13 +140,13 @@ func TestGitSubmodules_BumpRefusesToDropNestedWork(t *testing.T) {
 	}
 }
 
-// TestGitSubmodules_BumpKeepsNestedWorkThatABranchHolds is the DISCRIMINATING half of
+// TestGitSubmodules_FFKeepsNestedWorkThatABranchHolds is the DISCRIMINATING half of
 // the gate: the same work, on a BRANCH, is not lost by the update — the branch still
-// holds the commit after the checkout moved — so the bump must go through.
+// holds the commit after the checkout moved — so `ff` must go through.
 //
 // Without this half the gate would also pass a verb that refuses every nested
 // checkout, which is not a fix but a freeze (R7: a test that cannot fail is invalid).
-func TestGitSubmodules_BumpKeepsNestedWorkThatABranchHolds(t *testing.T) {
+func TestGitSubmodules_FFKeepsNestedWorkThatABranchHolds(t *testing.T) {
 	umb, innerCo, _, _, _, L2 := nestedWorkFixture(t)
 
 	writeFile(t, filepath.Join(innerCo, "work"), "work")
@@ -155,9 +155,9 @@ func TestGitSubmodules_BumpKeepsNestedWorkThatABranchHolds(t *testing.T) {
 	work := gitIn(t, innerCo, "rev-parse", "HEAD")
 	gitIn(t, innerCo, "branch", "keep")
 
-	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "ff"})
 	if st != spec.StatusPass {
-		t.Fatalf("the bump must go through when a branch holds the local commit, got %s: %s", st, msg)
+		t.Fatalf("`ff` must go through when a branch holds the local commit, got %s: %s", st, msg)
 	}
 	// The work survived the move.
 	if got := gitIn(t, innerCo, "rev-parse", "keep"); got != work {
@@ -169,14 +169,14 @@ func TestGitSubmodules_BumpKeepsNestedWorkThatABranchHolds(t *testing.T) {
 	}
 }
 
-// TestGitSubmodules_BumpRefusalIsScopedToTheRefusedSubmodule proves the SCOPE of the
+// TestGitSubmodules_FFRefusalIsScopedToTheRefusedSubmodule proves the SCOPE of the
 // refusal, which the #54 gate alone did not show.
 //
-// THE QUESTION: when the bump refuses a nested checkout that carries work, what is left
+// THE QUESTION: when `ff` refuses a nested checkout that carries work, what is left
 // untouched? The answer the shipped surfaces gave was "the tree" — which is not what the
-// product does. The bump collects PER-PATH failures and continues
+// product does. `ff` collects PER-PATH failures and continues
 // (opencharly/plugin-task#13: "ONE path's per-invocation failure costs that ONE pin, not
-// every pin sorted after it", proven by TestGitSubmodules_BumpContinuesPastFailure), so
+// every pin sorted after it", proven by TestGitSubmodules_FFContinuesPastFailure), so
 // a refusal stops ITS OWN submodule and nothing else.
 //
 // THE FIXTURE, and the ORDER that makes the scope observable: the umbrella carries two
@@ -195,9 +195,9 @@ func TestGitSubmodules_BumpKeepsNestedWorkThatABranchHolds(t *testing.T) {
 // sibling rolled, the refused one did not move), and the refusal is a real refusal (the
 // work is still there, the pin is not staged).
 //
-// Before the #54 fix this FAILS: the bump PASSES, the nested checkout is moved off the
+// Before the #54 fix this FAILS: `ff` PASSES, the nested checkout is moved off the
 // operator's commit, and nothing is reported.
-func TestGitSubmodules_BumpRefusalIsScopedToTheRefusedSubmodule(t *testing.T) {
+func TestGitSubmodules_FFRefusalIsScopedToTheRefusedSubmodule(t *testing.T) {
 	umb, innerCo, leafCo, o1, _, L2 := nestedWorkFixture(t)
 
 	// THE ORDER, read from the PRODUCT's own reader and ASSERTED. The scope is only
@@ -234,10 +234,10 @@ func TestGitSubmodules_BumpRefusalIsScopedToTheRefusedSubmodule(t *testing.T) {
 		t.Fatalf("fixture: the local commit must be referenced by no ref, got %q", out)
 	}
 
-	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
-	t.Logf("bump: %s: %s", st, msg)
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "ff"})
+	t.Logf("ff: %s: %s", st, msg)
 	if st != spec.StatusFail {
-		t.Fatalf("the bump must REFUSE the nested checkout whose commit the update would drop, got %s: %s", st, msg)
+		t.Fatalf("`ff` must REFUSE the nested checkout whose commit the update would drop, got %s: %s", st, msg)
 	}
 	if !strings.Contains(msg, "outer/inner") {
 		t.Fatalf("the refusal must NAME the nested checkout, got: %s", msg)

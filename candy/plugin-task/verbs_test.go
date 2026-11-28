@@ -207,7 +207,7 @@ func TestGitSubmodules_VerifyCheckoutAudit(t *testing.T) {
 
 	// FAIL: a checkout AHEAD of its recorded gitlink (a commit was added inside the checkout)
 	// must fail, and its DIRECTION must be named with the remedy. An advance made in the
-	// checkout is object-identically the un-staged-advance state `charly task sync` leaves after
+	// checkout is object-identically the un-staged-advance state `charly task ff` leaves after
 	// its staging is rewritten, so the two answers to give are "record it" and "discard it" —
 	// and neither is derivable from a bare `HEAD <h> != gitlink <g>`, which a broken pin
 	// produces verbatim (opencharly/opencharly#461).
@@ -418,12 +418,12 @@ func TestRequireVersion(t *testing.T) {
 	}
 }
 
-// TestGitSubmodules_BumpOrder pins the LOAD-BEARING bump order with REAL submodules:
+// TestGitSubmodules_FFOrder pins the LOAD-BEARING ff order with REAL submodules:
 // the pinned_from repo (`src`) is itself a ROLLING submodule, STALE in the umbrella,
-// and its `inner` gitlink ADVANCES during the bump. The pin_map entry (`target`) must
+// and its `inner` gitlink ADVANCES during `ff`. The pin_map entry (`target`) must
 // then be pinned from src's NEW gitlink. The reverse order pins target from src's
 // OLD gitlink then advances src, leaving the edge violated.
-func TestGitSubmodules_BumpOrder(t *testing.T) {
+func TestGitSubmodules_FFOrder(t *testing.T) {
 	base := t.TempDir()
 	mustGit := func(dir string, args ...string) string {
 		t.Helper()
@@ -482,7 +482,7 @@ func TestGitSubmodules_BumpOrder(t *testing.T) {
 	B := mustGit(srcOrigin, "rev-parse", "HEAD")
 	srcBare := filepath.Join(base, "src.git")
 	mustGit(base, "clone", "-q", "--bare", srcOrigin, srcBare)
-	// src checkout at B (the post-roll state bump will reach).
+	// src checkout at B (the post-roll state ff will reach).
 	src := filepath.Join(base, "src")
 	mustGit(base, "clone", "-q", srcBare, src)
 	mustGit(src, "checkout", "-q", B)
@@ -503,11 +503,11 @@ func TestGitSubmodules_BumpOrder(t *testing.T) {
 	mustGit(umb, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "src", "target")
 
 	in := map[string]any{
-		"mode": "bump", "pinned_from": "src", "pin_map": map[string]any{"target": "inner"},
+		"mode": "ff", "pinned_from": "src", "pin_map": map[string]any{"target": "inner"},
 	}
 	st, msg := runMaintenanceVerbIn(umb, "git-submodules", in)
 	if st != spec.StatusPass {
-		t.Fatalf("bump: %s: %s", st, msg)
+		t.Fatalf("ff: %s: %s", st, msg)
 	}
 	if got := gitlink(umb, "src"); got != B {
 		t.Fatalf("src did not roll: got %s want %s", got, B)
@@ -518,16 +518,16 @@ func TestGitSubmodules_BumpOrder(t *testing.T) {
 	}
 }
 
-// TestGitSubmodules_BumpAdvancesUnmaterializedPinInIndex proves the change
+// TestGitSubmodules_FFAdvancesUnmaterializedPinInIndex proves the change
 // opencharly/plugin-task#37 asks for: a submodule path that is DECLARED but has NO
-// CHECKOUT is not a broken pin and not a fatal condition — the bump advances its pin
+// CHECKOUT is not a broken pin and not a fatal condition — `ff` advances its pin
 // IN THE INDEX, from the remote's own tip, without materializing anything.
 //
 // It also pins charly#768's invariant, which the old fail-loud behaviour used to
 // enforce by refusing: no git operation runs inside the uninitialized directory, so
 // git's walk-up to the superproject stays impossible. The umbrella must come out of
-// the bump EXACTLY where it went in.
-func TestGitSubmodules_BumpAdvancesUnmaterializedPinInIndex(t *testing.T) {
+// `ff` EXACTLY where it went in.
+func TestGitSubmodules_FFAdvancesUnmaterializedPinInIndex(t *testing.T) {
 	base := t.TempDir()
 
 	// A leaf submodule SOURCE with one commit (so there is a real remote tip to read).
@@ -596,17 +596,17 @@ func TestGitSubmodules_BumpAdvancesUnmaterializedPinInIndex(t *testing.T) {
 	run(umb, "fetch", "-q", "origin")
 	run(umb, "branch", "--set-upstream-to=origin/main", "main")
 
-	// Record the UMBRELLA's own HEAD+branch BEFORE the bump, to prove it is untouched.
+	// Record the UMBRELLA's own HEAD+branch BEFORE `ff`, to prove it is untouched.
 	umbHeadBefore := run(umb, "rev-parse", "HEAD")
 	umbBranchBefore := run(umb, "rev-parse", "--abbrev-ref", "HEAD")
 
-	// bump over the WHOLE module set (no pin_map) — `target` advances to the remote's tip.
-	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
+	// ff over the WHOLE module set (no pin_map) — `target` advances to the remote's tip.
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "ff"})
 	if st != spec.StatusFail && st != spec.StatusPass {
-		t.Fatalf("bump: %s: %s", st, msg)
+		t.Fatalf("ff: %s: %s", st, msg)
 	}
 	if st != spec.StatusPass {
-		t.Fatalf("a bump over an UNMATERIALIZED path must not fail the run, got %s: %s", st, msg)
+		t.Fatalf("`ff` over an UNMATERIALIZED path must not fail the run, got %s: %s", st, msg)
 	}
 	// THE ASSERTION: the PIN moved, in the index, to the value the remote serves.
 	if got := gitlink(umb, "target"); got != leafTip {
@@ -615,7 +615,7 @@ func TestGitSubmodules_BumpAdvancesUnmaterializedPinInIndex(t *testing.T) {
 	// AND NOTHING WAS MATERIALIZED: the point of the change is that a wave never has
 	// to clone a repo to record where it is pinned.
 	if _, err := os.Stat(filepath.Join(umb, "target", ".git")); err == nil {
-		t.Fatalf("the bump materialized %q — the pin belongs in the index, not in a checkout", "target")
+		t.Fatalf("`ff` materialized %q — the pin belongs in the index, not in a checkout", "target")
 	}
 	// THE REGRESSION ASSERTION: the umbrella must be EXACTLY where it was — same
 	// HEAD, same branch. Pre-fix, `git -C target switch --detach origin/main` walked
@@ -628,13 +628,13 @@ func TestGitSubmodules_BumpAdvancesUnmaterializedPinInIndex(t *testing.T) {
 	}
 }
 
-// TestGitSubmodules_BumpSummaryReportsTheIndexAdvance proves the SUMMARY tells the
+// TestGitSubmodules_FFSummaryReportsTheIndexAdvance proves the SUMMARY tells the
 // reader which of the two things happened to each pin: a path with a checkout was
 // ROLLED in that checkout, a path with none was ADVANCED IN THE INDEX. The old
-// vocabulary — the "not an initialized checkout" precondition, which the bump refused
-// over — is GONE, because the bump no longer refuses: a pin that lives in the index
+// vocabulary — the "not an initialized checkout" precondition, which `ff` refused
+// over — is GONE, because `ff` no longer refuses: a pin that lives in the index
 // is a pin, and the summary says which way it moved.
-func TestGitSubmodules_BumpSummaryReportsTheIndexAdvance(t *testing.T) {
+func TestGitSubmodules_FFSummaryReportsTheIndexAdvance(t *testing.T) {
 	base := t.TempDir()
 
 	// A leaf submodule SOURCE with two commits (so there is a real ref to switch to).
@@ -702,14 +702,14 @@ func TestGitSubmodules_BumpSummaryReportsTheIndexAdvance(t *testing.T) {
 	run(umb, "fetch", "-q", "origin")
 	run(umb, "branch", "--set-upstream-to=origin/main", "main")
 
-	// Record the UMBRELLA's own HEAD+branch BEFORE the bump, to prove it is untouched.
+	// Record the UMBRELLA's own HEAD+branch BEFORE `ff`, to prove it is untouched.
 	umbHeadBefore := run(umb, "rev-parse", "HEAD")
 	umbBranchBefore := run(umb, "rev-parse", "--abbrev-ref", "HEAD")
 
-	// bump over the WHOLE module set (no pin_map) — `target` advances in the index.
-	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
+	// ff over the WHOLE module set (no pin_map) — `target` advances in the index.
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "ff"})
 	if st != spec.StatusPass {
-		t.Fatalf("bump over an unmaterialized submodule must PASS, got %s: %s", st, msg)
+		t.Fatalf("ff over an unmaterialized submodule must PASS, got %s: %s", st, msg)
 	}
 	// THE ASSERTION: the summary says the pin was advanced IN THE INDEX. Pre-change this
 	// run FAILED with "1 submodule(s) not an initialized checkout (target)", so neither the
@@ -717,13 +717,13 @@ func TestGitSubmodules_BumpSummaryReportsTheIndexAdvance(t *testing.T) {
 	if !strings.Contains(msg, "in the index") {
 		t.Fatalf("the summary must report the index advance, got: %s", msg)
 	}
-	// And the LEGACY vocabulary is gone: the bump no longer refuses over an unmaterialized
+	// And the LEGACY vocabulary is gone: `ff` no longer refuses over an unmaterialized
 	// path, so the phrase that refusal used is not in the summary any more (R5).
 	if strings.Contains(msg, "not an initialized checkout") {
-		t.Fatalf("the legacy uninitialized-checkout refusal is gone from the bump summary; got: %s", msg)
+		t.Fatalf("the legacy uninitialized-checkout refusal is gone from `ff` summary; got: %s", msg)
 	}
 	if strings.Contains(msg, "FAILED") {
-		t.Fatalf("the bump must not report a failure it did not have; got: %s", msg)
+		t.Fatalf("`ff` must not report a failure it did not have; got: %s", msg)
 	}
 
 	// THE REGRESSION ASSERTION: the umbrella must be EXACTLY where it was — same
@@ -736,7 +736,7 @@ func TestGitSubmodules_BumpSummaryReportsTheIndexAdvance(t *testing.T) {
 		t.Fatalf("umbrella branch changed: %q -> %q (the walk-up detach regression)", umbBranchBefore, got)
 	}
 	// The gating: the SAME tree in `status` mode must still succeed and still carry its marker -
-	// the change is scoped to bump, and status still reports the uninitialized path as it did.
+	// the change is scoped to ff, and status still reports the uninitialized path as it did.
 	stStatus, msgStatus := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "status"})
 	if stStatus == spec.StatusFail {
 		t.Fatalf("status must not fail on an uninitialized gitlink; got: %s", msgStatus)
@@ -808,10 +808,10 @@ func gitIn(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// bumpOrigins builds the two REAL bare origins the #13 fixtures use: `leaf` (L1 then
+// ffOrigins builds the two REAL bare origins the #13 fixtures use: `leaf` (L1 then
 // L2 — the roll target) and `doomed` (the origin a test REMOVES, so a submodule's
 // `git fetch origin` fails for real, with no mock and no sleep).
-func bumpOrigins(t *testing.T) (base, leafBare, doomedBare, L1, L2 string) {
+func ffOrigins(t *testing.T) (base, leafBare, doomedBare, L1, L2 string) {
 	t.Helper()
 	base = t.TempDir()
 	leaf := filepath.Join(base, "leaf")
@@ -837,10 +837,10 @@ func bumpOrigins(t *testing.T) (base, leafBare, doomedBare, L1, L2 string) {
 	return base, leafBare, doomedBare, L1, L2
 }
 
-// newBumpUmbrella builds a REAL umbrella declaring the named submodules (each with
+// newFFUmbrella builds a REAL umbrella declaring the named submodules (each with
 // branch=main), pins every submodule that is not `doomed`/`src` to pinSHA, and
 // initializes them all.
-func newBumpUmbrella(t *testing.T, base, pinSHA, leafBare, doomedBare string, names ...string) string {
+func newFFUmbrella(t *testing.T, base, pinSHA, leafBare, doomedBare string, names ...string) string {
 	t.Helper()
 	umb := filepath.Join(base, "umb-"+strings.Join(names, "-"))
 	gitIn(t, base, "init", "-q", "-b", "main", filepath.Base(umb))
@@ -870,25 +870,25 @@ func newBumpUmbrella(t *testing.T, base, pinSHA, leafBare, doomedBare string, na
 	return umb
 }
 
-// TestGitSubmodules_BumpContinuesPastFailure proves plugin-task#13's fix: ONE path's
+// TestGitSubmodules_FFContinuesPastFailure proves plugin-task#13's fix: ONE path's
 // per-invocation failure costs that ONE pin, not every pin sorted after it. Before the
-// fix the walk RETURNED at the first failure (phase 1 of `bump`), so a single contended
+// fix the walk RETURNED at the first failure (phase 1 of `ff`), so a single contended
 // checkout — a momentarily held superproject `.git/index.lock` failing that path's
 // `git add`, the mechanism reproduced in the issue — stranded the whole remainder.
-func TestGitSubmodules_BumpContinuesPastFailure(t *testing.T) {
-	base, leafBare, doomedBare, L1, L2 := bumpOrigins(t)
+func TestGitSubmodules_FFContinuesPastFailure(t *testing.T) {
+	base, leafBare, doomedBare, L1, L2 := ffOrigins(t)
 	// Path order is SORTED (gitmodulesPaths), so `doomed` is visited FIRST and `zebra`
 	// sorts AFTER it — exactly the ordering that used to strand the rest.
-	umb := newBumpUmbrella(t, base, L1, leafBare, doomedBare, "doomed", "zebra")
+	umb := newFFUmbrella(t, base, L1, leafBare, doomedBare, "doomed", "zebra")
 	// The failing path's failure is set up AFTER initialization: its origin is GONE,
 	// so `git fetch origin` in that submodule fails for real.
 	if err := os.RemoveAll(doomedBare); err != nil {
 		t.Fatal(err)
 	}
 
-	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "ff"})
 	if st != spec.StatusFail {
-		t.Fatalf("bump with one failing path must FAIL, got %s: %s", st, msg)
+		t.Fatalf("ff with one failing path must FAIL, got %s: %s", st, msg)
 	}
 	if !strings.Contains(msg, "doomed") {
 		t.Fatalf("the aggregated failure must NAME the failing path, got: %s", msg)
@@ -899,23 +899,23 @@ func TestGitSubmodules_BumpContinuesPastFailure(t *testing.T) {
 	}
 }
 
-// TestGitSubmodules_BumpRefusesStalePinnedFrom proves the LOAD-BEARING order guard
+// TestGitSubmodules_FFRefusesStalePinnedFrom proves the LOAD-BEARING order guard
 // survives the continue-on-failure change: when the pinned_from repo does NOT roll, its
 // gitlinks are the OLD ones, and pinning a pin_map entry from them is the EDGE
 // violation that order exists to prevent. Phase 2 must REFUSE and say so — never
 // silently pin from stale data.
-func TestGitSubmodules_BumpRefusesStalePinnedFrom(t *testing.T) {
-	base, leafBare, doomedBare, L1, _ := bumpOrigins(t)
-	umb := newBumpUmbrella(t, base, L1, leafBare, doomedBare, "src", "target")
+func TestGitSubmodules_FFRefusesStalePinnedFrom(t *testing.T) {
+	base, leafBare, doomedBare, L1, _ := ffOrigins(t)
+	umb := newFFUmbrella(t, base, L1, leafBare, doomedBare, "src", "target")
 	if err := os.RemoveAll(doomedBare); err != nil {
 		t.Fatal(err)
 	}
 
 	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{
-		"mode": "bump", "pinned_from": "src", "pin_map": map[string]any{"target": "inner"},
+		"mode": "ff", "pinned_from": "src", "pin_map": map[string]any{"target": "inner"},
 	})
 	if st != spec.StatusFail {
-		t.Fatalf("a bump whose pinned_from did not roll must FAIL, got %s: %s", st, msg)
+		t.Fatalf("`ff` whose pinned_from did not roll must FAIL, got %s: %s", st, msg)
 	}
 	if !strings.Contains(msg, "did not roll") {
 		t.Fatalf("the refusal must say the pinned_from did not roll, got: %s", msg)
@@ -926,7 +926,7 @@ func TestGitSubmodules_BumpRefusesStalePinnedFrom(t *testing.T) {
 	}
 }
 
-// TestGitSubmodules_BumpNamesTheUnmaterializedSourceWithoutBranch proves the THIRD
+// TestGitSubmodules_FFNamesTheUnmaterializedSourceWithoutBranch proves the THIRD
 // shape of the source classification, the one the wave-3 state machine left
 // unclassified: a pinned_from that has NO CHECKOUT and declares NO `branch=`.
 //
@@ -935,7 +935,7 @@ func TestGitSubmodules_BumpRefusesStalePinnedFrom(t *testing.T) {
 // gitlinks that were never there (opencharly/plugin-task#39). Before the fix the
 // source was classified by the ROLL, so a source that never rolls because it
 // declares no ref was reported as a stale one.
-func TestGitSubmodules_BumpNamesTheUnmaterializedSourceWithoutBranch(t *testing.T) {
+func TestGitSubmodules_FFNamesTheUnmaterializedSourceWithoutBranch(t *testing.T) {
 	base := t.TempDir()
 
 	// A source repo with one commit: the umbrella DECLARES it, and the declaration
@@ -996,10 +996,10 @@ func TestGitSubmodules_BumpNamesTheUnmaterializedSourceWithoutBranch(t *testing.
 	umbBranchBefore := gitIn(t, umb, "rev-parse", "--abbrev-ref", "HEAD")
 
 	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{
-		"mode": "bump", "pinned_from": "src", "pin_map": map[string]any{"target": "inner"},
+		"mode": "ff", "pinned_from": "src", "pin_map": map[string]any{"target": "inner"},
 	})
 	if st != spec.StatusFail {
-		t.Fatalf("a bump whose pinned_from has no checkout must FAIL, got %s: %s", st, msg)
+		t.Fatalf("`ff` whose pinned_from has no checkout must FAIL, got %s: %s", st, msg)
 	}
 	// THE ASSERTION: the refusal names the MISSING CHECKOUT and the command that
 	// materializes it.
@@ -1026,17 +1026,17 @@ func TestGitSubmodules_BumpNamesTheUnmaterializedSourceWithoutBranch(t *testing.
 	}
 }
 
-// TestGitSubmodules_BumpExternalPinnedFrom is the boundary guard for the refusal above:
+// TestGitSubmodules_FFExternalPinnedFrom is the boundary guard for the refusal above:
 // a pinned_from that is NOT one of this project's own submodules — the `../src` shape
-// scripts/gate-task.sh's pins-bump fixture exercises, and the shape the umbrella's own
+// scripts/gate-task.sh's pins-ff fixture exercises, and the shape the umbrella's own
 // `pins` task uses when the twin lives outside the tree — is NEVER rolled by this walk,
 // so it must not be judged "did not roll". Its gitlinks are READ and pinned from, exactly
 // as before. This test fails if the staleness refusal is widened to external checkouts,
 // which would make every roll of that shape a hard failure.
-func TestGitSubmodules_BumpExternalPinnedFrom(t *testing.T) {
-	base, leafBare, doomedBare, L1, L2 := bumpOrigins(t)
+func TestGitSubmodules_FFExternalPinnedFrom(t *testing.T) {
+	base, leafBare, doomedBare, L1, L2 := ffOrigins(t)
 	// The umbrella declares ONLY `target`; the pinned_from lives BESIDE it.
-	umb := newBumpUmbrella(t, base, L1, leafBare, doomedBare, "target")
+	umb := newFFUmbrella(t, base, L1, leafBare, doomedBare, "target")
 	// `srcrepo` is a sibling checkout, NOT a submodule of the umbrella. It pins `inner`
 	// at L2 — the value `target` must adopt.
 	srcDir := filepath.Join(base, "srcrepo")
@@ -1049,7 +1049,7 @@ func TestGitSubmodules_BumpExternalPinnedFrom(t *testing.T) {
 	gitIn(t, srcDir, "commit", "-qm", "inner=L2")
 
 	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{
-		"mode": "bump", "pinned_from": "../srcrepo", "pin_map": map[string]any{"target": "inner"},
+		"mode": "ff", "pinned_from": "../srcrepo", "pin_map": map[string]any{"target": "inner"},
 	})
 	if st != spec.StatusPass {
 		t.Fatalf("an EXTERNAL pinned_from must still pin its pin_map entries, got %s: %s", st, msg)

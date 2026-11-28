@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/opencharly/spec/spec"
 )
@@ -106,9 +105,9 @@ func curRecord(t *testing.T, dir, path, sha string) {
 // `verify` asserts that a checkout matches the gitlink the INDEX records; it passes on a
 // tree whose every pin is behind the ref its repo serves — MEASURED, `verify` was green
 // while five of six `distro-*` were behind. This mode answers the other question, from the
-// recorded gitlink and the REMOTE alone, names the advance as a LEG, and refuses the
-// structural states outright. The upstream is a LOCAL repository path, so the walk is
-// exercised live without network access.
+// recorded gitlink and the REMOTE alone, and `behind` FAILS: the recorded gitlink does not
+// hold the tip the branch `.gitmodules` declares. The upstream is a LOCAL repository path,
+// so the walk is exercised live without network access.
 func TestGitSubmodules_CurrencyIsNotConsistency(t *testing.T) {
 	tmp := t.TempDir()
 	dir, run, c1, c2, _ := curSuper(t, tmp)
@@ -116,25 +115,24 @@ func TestGitSubmodules_CurrencyIsNotConsistency(t *testing.T) {
 	curRecord(t, dir, "d", c2) // a second pin, already current: isolates the arm below
 	run("commit", "-qm", "src behind its main, d current")
 
-	// Arm 1 — a LEAF behind the ref it names, beside one that is current. The advance is a
-	// REACHABLE advance, so the run PASSES and the Message LEADS with the count, naming the
-	// advance as a leg. (A gate that failed here would be permanently red on a healthy
-	// cross-repo sequence, which is how a gate teaches its readers to ignore it.)
+	// Arm 1 — a LEAF behind the ref it names, beside one that is current. `behind` is a
+	// FAILURE, and the Message still LEADS with the count, names the advance AND the remedy.
 	st, msg := runMaintenanceVerbIn(dir, "git-submodules", map[string]any{"mode": "currency"})
-	if st != spec.StatusPass {
-		t.Fatalf("a reachable advance is a leg, not a defect; got %s: %s", st, msg)
+	if st != spec.StatusFail {
+		t.Fatalf("a pin behind the ref it names must FAIL, got %s: %s", st, msg)
 	}
 	for _, want := range []string{
 		"1 of 2 pin(s) NOT current",
 		"1 behind",
 		"src (" + c1[:10] + " -> " + c2[:10] + ")",
+		"charly task ff",
 	} {
 		if !strings.Contains(msg, want) {
-			t.Fatalf("the report must lead with what is not current; missing %q in:\n%s", want, msg)
+			t.Fatalf("the report must lead with what is not current and name the remedy; missing %q in:\n%s", want, msg)
 		}
 	}
 	// The intent is REPORTED, not left silent: this path declares none, so the intent that
-	// `bump` actually implements is stated as implicit.
+	// `ff` actually implements is stated as implicit.
 	if !strings.Contains(msg, "implicit: .gitmodules branch=") {
 		t.Fatalf("an implicit intent must be stated in the report, got:\n%s", msg)
 	}
@@ -153,8 +151,8 @@ func TestGitSubmodules_CurrencyIsNotConsistency(t *testing.T) {
 
 // TestGitSubmodules_CurrencyReportsBlockedBy proves the state the contract being replaced
 // could not express: an EDGE whose recorded value is CORRECT while its SOURCE is behind.
-// The run PASSES — the edge is a leg of a producer-first sequence — and the leg order names
-// the producer, which is the reason a session no longer has to discover it an hour later.
+// The run FAILS — the repo does not hold the tip its intent names — the leg order names
+// the producer first, and the message names the remedy.
 func TestGitSubmodules_CurrencyReportsBlockedBy(t *testing.T) {
 	tmp := t.TempDir()
 	dir, run, c1, c2, i1 := curSuper(t, tmp)
@@ -165,13 +163,14 @@ func TestGitSubmodules_CurrencyReportsBlockedBy(t *testing.T) {
 	st, msg := runMaintenanceVerbIn(dir, "git-submodules", map[string]any{
 		"mode": "currency", "pinned_from": "src", "pin_map": map[string]any{"d": "inner"},
 	})
-	if st != spec.StatusPass {
-		t.Fatalf("an edge over a behind source is a LEG, not a defect; got %s: %s", st, msg)
+	if st != spec.StatusFail {
+		t.Fatalf("an edge over a behind source must FAIL, got %s: %s", st, msg)
 	}
 	for _, want := range []string{
 		"blocked-by src:inner (behind)",
 		"1 behind",
 		"src (" + c1[:10] + " -> " + c2[:10] + ") -> d (blocked-by src:inner (behind))",
+		"charly task ff",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("the producer leg must be NAMED and ordered first; missing %q in:\n%s", want, msg)
@@ -246,14 +245,15 @@ func TestGitSubmodules_CurrencyJudgesAnExplicitDerivedFrom(t *testing.T) {
 	curRecord(t, dir, "d", c1) // d's claim: "my value is src's"
 	run("commit", "-qm", "d derives from src in-repo")
 
-	// src is BEHIND its main, so an edge that correctly mirrors a behind source is a LEG.
+	// src is BEHIND its main, so an edge that correctly mirrors a behind source still does
+	// NOT hold the tip its source's ref names: it FAILS, and names the source's state.
 	st, msg := runMaintenanceVerbIn(dir, "git-submodules", map[string]any{
 		"mode": "currency", "intent": map[string]any{"d": "derived-from:src"},
 	})
-	if st != spec.StatusPass {
-		t.Fatalf("an in-repo edge over a behind source is a leg; got %s: %s", st, msg)
+	if st != spec.StatusFail {
+		t.Fatalf("an in-repo edge over a behind source must FAIL; got %s: %s", st, msg)
 	}
-	for _, want := range []string{"blocked-by src (behind)", "derived-from:src"} {
+	for _, want := range []string{"blocked-by src (behind)", "derived-from:src", "charly task ff"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("the in-repo edge must name its own source and state; missing %q in:\n%s", want, msg)
 		}
@@ -271,9 +271,10 @@ func TestGitSubmodules_CurrencyJudgesAnExplicitDerivedFrom(t *testing.T) {
 // TestGitSubmodules_CurrencyNamesTheSquashAdvance pins the class a first cut got wrong: a pin
 // taken before a SQUASH merge is unreachable from the served ref, because the branch advanced
 // without descending from its previous head. MEASURED on the real umbrella, where `charly`'s
-// own history is squash-merged and the honest state is "advance the pin" — not a divergence,
-// and NOT a failure. A hand-pin to an unrelated commit produces the same two SHAs, so the
-// report names the class and the remedy that is right for both.
+// own history is squash-merged and the honest state is "advance the pin", not a divergence.
+// It IS a failure now — the pin does not hold the tip the branch declares — and the report
+// names the class, the reason and the remedy. A hand-pin to an unrelated commit produces the
+// same two SHAs, so the report's wording is right for both.
 func TestGitSubmodules_CurrencyNamesTheSquashAdvance(t *testing.T) {
 	tmp := t.TempDir()
 	up := filepath.Join(tmp, "up")
@@ -301,10 +302,15 @@ func TestGitSubmodules_CurrencyNamesTheSquashAdvance(t *testing.T) {
 	run("commit", "-qm", "pin taken before the squash")
 
 	st, msg := runMaintenanceVerbIn(dir, "git-submodules", map[string]any{"mode": "currency"})
-	if st != spec.StatusPass {
-		t.Fatalf("a squash advance is a leg, not a defect; got %s: %s", st, msg)
+	if st != spec.StatusFail {
+		t.Fatalf("a pin off the served line must FAIL; got %s: %s", st, msg)
 	}
-	for _, want := range []string{"not-on-the-served-line", "squash-merged branch", "1 of 1 pin(s) NOT current"} {
+	for _, want := range []string{
+		"not-on-the-served-line",
+		"squash-merged branch",
+		"1 of 1 pin(s) NOT current",
+		"charly task ff",
+	} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("the class must be named with its remedy; missing %q in:\n%s", want, msg)
 		}
@@ -402,221 +408,130 @@ func TestGitSubmodules_CurrencyRefusesDepthForBOTHEdgeShapes(t *testing.T) {
 	}
 }
 
-// curStale builds the fixture the staleness arms need: a superproject whose `src` pin is
-// either behind its upstream (`behind`) or at it (`current`), whose `d` pin is current, and
-// whose LAST commit — the one that touched the pins — is dated `ago` in the past.
-//
-// The date is the fixture's whole point: the age of this repo's own bookkeeping for a pin
-// is read from that commit, so the same tree is the healthy regime or the neglect regime
-// depending only on when it was last advanced.
-func curStale(t *testing.T, tmp, name string, behind bool, ago time.Duration) (dir, c1, c2 string) {
-	t.Helper()
-	dir, run, c1, c2, _ := curSuper(t, filepath.Join(tmp, name))
-	curRecord(t, dir, "d", c2) // current: isolates the arm under test
-	if behind {
-		curRecord(t, dir, "src", c1)
-	} else {
-		curRecord(t, dir, "src", c2)
-	}
-	stamp := time.Now().Add(-ago).UTC().Format(time.RFC3339)
-	t.Setenv("GIT_AUTHOR_DATE", stamp)
-	t.Setenv("GIT_COMMITTER_DATE", stamp)
-	run("commit", "-qm", "record the pins")
-	return dir, c1, c2
-}
-
-// TestGitSubmodules_CurrencyStalenessBoundsNeglect proves the control that the recurring
-// stale twin needed — a bound on NEGLECT, not on churn.
-//
-// The measurement behind it: a twin whose upstream moves daily is behind its served ref
-// roughly 75% of wall-clock time, with continuous behind-windows of 8 and 10 days. A gate
-// that failed on the DISTANCE would therefore be red on a healthy tree, which trains every
-// reader to ignore it. What actually recurred was charly's own ADVANCE CADENCE: gaps of
-// 8 and 10 days with no advance at all, against a healthy maximum of 5 days.
-//
-// So the bound is on the AGE of this repo's last advance of a pin, and the arms below are
-// a one-variable differential: the same tree, the same pin, the same bound — only the date
-// of the last advance differs, and the verdict flips with it.
-func TestGitSubmodules_CurrencyStalenessBoundsNeglect(t *testing.T) {
-	tmp := t.TempDir()
-	bound := "168h"
-
-	// Arm 1 — the tree as it is, with the knob UNSET: the verdict is the structural one
-	// alone, exactly as before the knob existed. The opt-in is real, and a repo that has
-	// not declared a bound sees no change at all.
-	oldDir, _, _ := curStale(t, tmp, "old", true, 240*time.Hour)
-	st, msg := runMaintenanceVerbIn(oldDir, "git-submodules", map[string]any{"mode": "currency"})
-	if st != spec.StatusPass {
-		t.Fatalf("without a declared bound the verdict must be unchanged; got %s: %s", st, msg)
-	}
-	if !strings.Contains(msg, "1 of 2 pin(s) NOT current") || strings.Contains(msg, "STALE") {
-		t.Fatalf("an undeclared bound must not mention staleness; got:\n%s", msg)
-	}
-
-	// Arm 2 — the same tree WITH the bound: the pin is behind AND this repo has not
-	// advanced it for 240h, which is past the 168h bound, so it is STALE and FAILS.
-	st, msg = runMaintenanceVerbIn(oldDir, "git-submodules", map[string]any{
-		"mode": "currency", "stale_after": bound,
-	})
-	if st != spec.StatusFail {
-		t.Fatalf("a pin neglected for longer than the bound must fail; got %s: %s", st, msg)
-	}
-	for _, want := range []string{
-		"1 STALE pin(s) (neglected for more than 168h)",
-		"src: behind, and this repo has not advanced it for 240h",
-		"(bound 168h)",
-		"FAILED on the STALE pin(s) above",
-	} {
-		if !strings.Contains(msg, want) {
-			t.Fatalf("the stale verdict must name the pin, its age and the bound; missing %q in:\n%s", want, msg)
-		}
-	}
-
-	// Arm 3 — THE DIFFERENTIAL. The same tree, the same behind pin, the same bound, and the
-	// ONLY difference is when this repo last advanced it: an advance a minute ago is
-	// CHURN-IN-PROGRESS, not neglect, so the run PASSES. A control that failed here would
-	// be red on a healthy tree, which is the failure this knob exists to avoid.
-	freshDir, _, _ := curStale(t, tmp, "fresh", true, time.Minute)
-	st, msg = runMaintenanceVerbIn(freshDir, "git-submodules", map[string]any{
-		"mode": "currency", "stale_after": bound,
-	})
-	if st != spec.StatusPass {
-		t.Fatalf("a pin advanced a minute ago is churn, not neglect; got %s: %s", st, msg)
-	}
-	if strings.Contains(msg, "STALE") {
-		t.Fatalf("a recently advanced pin must not be stale; got:\n%s", msg)
-	}
-	if !strings.Contains(msg, "1 of 2 pin(s) NOT current") {
-		t.Fatalf("the not-current count must still be reported; got:\n%s", msg)
-	}
-
-	// Arm 4 — the IDLE-UPSTREAM trap: a pin that is CURRENT but was advanced a long time
-	// ago. An upstream that has not moved is not neglected, and the bound must not fire on
-	// it — otherwise every quiet repo in the org goes red on its own silence.
-	idleDir, _, _ := curStale(t, tmp, "idle", false, 240*time.Hour)
-	st, msg = runMaintenanceVerbIn(idleDir, "git-submodules", map[string]any{
-		"mode": "currency", "stale_after": bound,
-	})
-	if st != spec.StatusPass {
-		t.Fatalf("a current pin is never stale, however old its last advance; got %s: %s", st, msg)
-	}
-	if strings.Contains(msg, "STALE") {
-		t.Fatalf("a current pin must not be reported stale; got:\n%s", msg)
-	}
-
-	// Arm 5 — a malformed bound is a loud failure, never a silently disabled control.
-	st, msg = runMaintenanceVerbIn(oldDir, "git-submodules", map[string]any{
-		"mode": "currency", "stale_after": "7d",
-	})
-	if st != spec.StatusFail || !strings.Contains(msg, "not a duration") {
-		t.Fatalf("a malformed bound must fail loud; got %s: %s", st, msg)
-	}
-
-	// Arm 6 — a NON-POSITIVE bound is refused. Zero (or less) is not a bound: it marks
-	// EVERY not-current pin stale, which is precisely the permanently-red gate this knob
-	// exists to avoid, so it is an operator error the verb refuses rather than honours.
-	// The validator's round-1 observation named it.
-	for _, bad := range []string{"0s", "0", "-1h"} {
-		st, msg = runMaintenanceVerbIn(oldDir, "git-submodules", map[string]any{
-			"mode": "currency", "stale_after": bad,
-		})
-		if st != spec.StatusFail || !strings.Contains(msg, "not a POSITIVE duration") {
-			t.Fatalf("a non-positive bound must be refused; got %s: %s", st, msg)
-		}
-		if strings.Contains(msg, "STALE pin(s)") {
-			t.Fatalf("a refused bound must not judge staleness; got:\n%s", msg)
-		}
-	}
-
-	// Arm 7 — a FAILED READ is not neglect. When the repo's history cannot be read, the
-	// age of the last advance is UNKNOWN, and an unknown is not a claim that the owner
-	// neglected the pin. It is reported as a structural failure that names the read
-	// error — the workflow being unable to JUDGE the pin — and never as a stale verdict.
-	//
-	// The corruption is real: the superproject's HEAD commit object is removed, so the
-	// history genuinely cannot be read. The tree is otherwise the same neglect fixture, so
-	// the ONLY difference from Arm 2 is the readability of the evidence.
-	brokenDir, _, _ := curStale(t, tmp, "broken", true, 240*time.Hour)
-	brokenSHA := curGit(t, "-C", brokenDir, "rev-parse", "HEAD")
-	brokenObj := filepath.Join(brokenDir, ".git", "objects", brokenSHA[:2], brokenSHA[2:])
-	if err := os.Remove(brokenObj); err != nil {
-		t.Fatalf("remove the HEAD commit object: %v", err)
-	}
-	st, msg = runMaintenanceVerbIn(brokenDir, "git-submodules", map[string]any{
-		"mode": "currency", "stale_after": bound,
-	})
-	if st != spec.StatusFail {
-		t.Fatalf("an unreadable history must fail, not pass; got %s: %s", st, msg)
-	}
-	if strings.Contains(msg, "STALE pin(s)") {
-		t.Fatalf("an unreadable history must never be reported as neglect; got:\n%s", msg)
-	}
-	if !strings.Contains(msg, "could not be read") {
-		t.Fatalf("an unreadable history must name the read failure; got:\n%s", msg)
-	}
-
-	// Arm 8 — a pin in NO commit of this repo's history. The path is in the index and in
-	// .gitmodules, but this repo has never committed an advance of it, so its age is
-	// unbounded and it IS neglected. This is the third outcome of the read, and it is
-	// the opposite of Arm 7: the history reads FINE here (the repo has commits), it simply
-	// holds no advance of THIS path. A read that returns nothing is a fact about the
-	// bookkeeping, not a failure to read it.
-	noHistDir, run, c1, c2, _ := curSuper(t, filepath.Join(tmp, "nohist"))
-	curRecord(t, noHistDir, "d", c2) // current: isolates the arm under test
-	curRecord(t, noHistDir, "src", c1)
-	// Commit ONLY .gitmodules: the gitlinks stay in the index, so the pins exist for the
-	// currency mode (which reads the INDEX) while no commit of this repo ever touched
-	// the path `src`.
-	run("commit", "-qm", "the modules only", "--", ".gitmodules")
-	st, msg = runMaintenanceVerbIn(noHistDir, "git-submodules", map[string]any{
-		"mode": "currency", "stale_after": bound,
-	})
-	if st != spec.StatusFail {
-		t.Fatalf("a pin this repo has never advanced must fail; got %s: %s", st, msg)
-	}
-	if !strings.Contains(msg, "has never been advanced here") {
-		t.Fatalf("a pin in no commit must be reported as never advanced here; got:\n%s", msg)
-	}
-	if strings.Contains(msg, "could not be read") {
-		t.Fatalf("a readable history must not be reported as unreadable; got:\n%s", msg)
-	}
-}
-
-// TestGitSubmodules_CurrencyNamesTheTagAtTheServedCommit pins opencharly/opencharly#793: the
-// report named each pin's SERVED commit and never whether a TAG pointed at it, so a body could
-// call a pin "merged and tagged" with no part of the answer disagreeing. The fact is now stated
-// per pin and tallied over the leaves, so an all-current run answers the tag question too.
-func TestGitSubmodules_CurrencyNamesTheTagAtTheServedCommit(t *testing.T) {
+// TestGitSubmodules_CurrencyFailsOnBehind is the strict-currency gate: a pin BEHIND the
+// tip its branch declares is a FAILURE, not a reported pass. The recorded gitlink must
+// EQUAL the served tip; "behind, but a leg of a cross-repo sequence" is no longer a green
+// verdict, because the repo does not hold the tip its intent names.
+func TestGitSubmodules_CurrencyFailsOnBehind(t *testing.T) {
 	tmp := t.TempDir()
 	dir, run, c1, c2, _ := curSuper(t, tmp)
-	curRecord(t, dir, "src", c1) // behind its main: it appears in the NOT CURRENT detail
-	curRecord(t, dir, "d", c2)
-	run("commit", "-qm", "src behind, d current")
+	curRecord(t, dir, "src", c1) // behind `up`'s main, which serves c2
+	curRecord(t, dir, "d", c2)   // current, so the arm isolates the behind pin
+	run("commit", "-qm", "src behind its main")
 
-	// Arm 1 — no tag exists anywhere. The report STATES the absence; it never stays silent.
+	st, msg := runMaintenanceVerbIn(dir, "git-submodules", map[string]any{"mode": "currency"})
+	if st != spec.StatusFail {
+		t.Fatalf("a pin behind the tip its branch declares must FAIL, got %s: %s", st, msg)
+	}
+	for _, want := range []string{"1 of 2 pin(s) NOT current", "behind", "src", "charly task ff"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("the failure must name the pin, its state and the remedy; missing %q in:\n%s", want, msg)
+		}
+	}
+	_ = c2
+}
+
+// TestGitSubmodules_CurrencyPassesWhenCurrent is the PASSING half of the same gate: the
+// SAME fixture, advanced to the tip the branch declares, is current and passes. Without
+// this half a verb that failed every pin would satisfy the test above.
+func TestGitSubmodules_CurrencyPassesWhenCurrent(t *testing.T) {
+	tmp := t.TempDir()
+	dir, run, _, c2, _ := curSuper(t, tmp)
+	curRecord(t, dir, "src", c2) // at the served tip
+	curRecord(t, dir, "d", c2)   // a second current pin
+	run("commit", "-qm", "src current")
+
 	st, msg := runMaintenanceVerbIn(dir, "git-submodules", map[string]any{"mode": "currency"})
 	if st != spec.StatusPass {
-		t.Fatalf("a reachable advance must still pass: %s: %s", st, msg)
+		t.Fatalf("a pin at the tip its branch declares must PASS, got %s: %s", st, msg)
 	}
-	if !strings.Contains(msg, "; no tag at served") {
-		t.Fatalf("the report must say a pin's served commit is untagged, got:\n%s", msg)
+	for _, want := range []string{"0 of 2 pin(s) NOT current", "2 cur", "producer-first legs: none"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("a current pin must read as current with no legs; missing %q in:\n%s", want, msg)
+		}
 	}
-	if !strings.Contains(msg, "tags at served: 0 of 2 leaf pin(s) (2 without") {
-		t.Fatalf("the tally must answer the tag question for the whole tree, got:\n%s", msg)
-	}
+}
 
-	// Arm 2 — an ANNOTATED tag on the served commit. The peeled `<ref>^{}` line is what must
-	// match: a comparison against the tag OBJECT would report this pin as untagged.
+// TestGitSubmodules_CurrencyConsultsNoTag proves the tag relation is GONE: a tag at the
+// served commit changes neither the verdict nor the report. The tag FACT and its tally
+// (opencharly/opencharly#793) were removed with the tag-pinning contract — currency now
+// asks one question only, whether the recorded gitlink equals the tip its branch declares.
+func TestGitSubmodules_CurrencyConsultsNoTag(t *testing.T) {
+	tmp := t.TempDir()
+	dir, run, _, c2, _ := curSuper(t, tmp)
+	curRecord(t, dir, "src", c2)
+	curRecord(t, dir, "d", c2)
+	run("commit", "-qm", "src current")
+	// An ANNOTATED tag at the served commit: the shape the removed tally used to name.
 	curGit(t, "-C", filepath.Join(tmp, "up"), "tag", "-a", "v9.9.9", "-m", "release", c2)
 
-	st, msg = runMaintenanceVerbIn(dir, "git-submodules", map[string]any{"mode": "currency"})
+	st, msg := runMaintenanceVerbIn(dir, "git-submodules", map[string]any{"mode": "currency"})
 	if st != spec.StatusPass {
-		t.Fatalf("tagging a commit cannot fail the currency verdict: %s: %s", st, msg)
+		t.Fatalf("a tag at the served commit cannot change the verdict; got %s: %s", st, msg)
 	}
-	if !strings.Contains(msg, "; tag v9.9.9") {
-		t.Fatalf("an annotated tag at the served commit must be named (peeled form), got:\n%s", msg)
+	for _, gone := range []string{"tag v9.9.9", "tags at served", "no tag at served"} {
+		if strings.Contains(msg, gone) {
+			t.Fatalf("no tag may be consulted or reported any more; found %q in:\n%s", gone, msg)
+		}
 	}
-	if !strings.Contains(msg, "tags at served: 2 of 2 leaf pin(s) (0 without") {
-		t.Fatalf("the tally must count both pins tagged at served, got:\n%s", msg)
+}
+
+// TestGitSubmodules_CurrencyReportsUnjudgeableLeaf pins the ONE reported non-failure: a
+// pin whose recorded value differs from the served ref while NO checkout exists to judge
+// the ancestry. It is genuinely unjudgeable — a light tree records the pin and holds no
+// objects for it — so manufacturing a red would be as dishonest as manufacturing a green.
+// The count of not-current pins still leads, so the state is never invisible.
+func TestGitSubmodules_CurrencyReportsUnjudgeableLeaf(t *testing.T) {
+	tmp := t.TempDir()
+	dir, run, c1, c2, _ := curSuper(t, tmp)
+	curRecord(t, dir, "src", c2) // current
+	curRecord(t, dir, "d", c1)   // differs, and d has NO checkout
+	run("commit", "-qm", "src current, d unjudgeable")
+
+	st, msg := runMaintenanceVerbIn(dir, "git-submodules", map[string]any{"mode": "currency"})
+	if st != spec.StatusPass {
+		t.Fatalf("an unjudgeable pin is a REPORTED non-failure, got %s: %s", st, msg)
+	}
+	for _, want := range []string{
+		"1 of 2 pin(s) NOT current",
+		"differs (no checkout to judge ancestry)",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("the unjudgeable state must be reported, not failed; missing %q in:\n%s", want, msg)
+		}
+	}
+}
+
+// TestGitSubmodules_CurrencyReportsUnjudgeableTwin is the same rule one hop further: an
+// EDGE whose own value HOLDS, whose twin the workflow cannot adjudicate because the twin's
+// checkout is absent. The producer's tree is readable (the source checkout exists and
+// records the twin), so this is NOT a structural failure — it is the same unjudgeable
+// class as a leaf's `differs`, and must not be manufactured into a red on a light tree.
+func TestGitSubmodules_CurrencyReportsUnjudgeableTwin(t *testing.T) {
+	tmp := t.TempDir()
+	dir, run, _, c2, i1 := curSuper(t, tmp)
+	curRecord(t, dir, "src", c2) // current
+	curRecord(t, dir, "d", i1)   // the edge's own value: the twin src records
+	run("commit", "-qm", "src current, edge holds")
+	// Remove the twin's checkout: the source tree is still readable, but the twin's
+	// ancestry cannot be judged here.
+	if err := os.RemoveAll(filepath.Join(dir, "src", "inner")); err != nil {
+		t.Fatal(err)
+	}
+
+	st, msg := runMaintenanceVerbIn(dir, "git-submodules", map[string]any{
+		"mode": "currency", "pinned_from": "src", "pin_map": map[string]any{"d": "inner"},
+	})
+	if st != spec.StatusPass {
+		t.Fatalf("an unjudgeable twin is a REPORTED non-failure, got %s: %s", st, msg)
+	}
+	for _, want := range []string{
+		"1 of 2 pin(s) NOT current",
+		"blocked-by src:inner (differs",
+		"no checkout of inner to judge ancestry",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("the unjudgeable twin must be reported, not failed; missing %q in:\n%s", want, msg)
+		}
 	}
 }

@@ -10,9 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/opencharly/plugin-task/candy/plugin-task/params"
 	pb "github.com/opencharly/spec/proto"
@@ -25,7 +23,7 @@ import (
 // law) — no org name, repo name, or distro list is baked in.
 //
 // They are HOST-NATIVE like the task engine: a maintenance verb operates on the
-// repository CHECKOUT the charly process runs in (`charly task sync`, etc.), so
+// repository CHECKOUT the charly process runs in (`charly task ff`, etc.), so
 // they resolve the project dir the same way loadTaskSet does (the process cwd) and
 // run git/go/file operations against it. The compiled-in placement gives them the
 // host checkout; that is the same placement requirement command:task has.
@@ -217,9 +215,9 @@ func resolveUpstreamRef(projDir, url, ref string) (sha, which string) {
 // pin holds, read from the REMOTE and from nothing local.
 //
 // It is the ONE branch read in this file. `resolveUpstreamRef` (the CURRENCY question)
-// calls it, and so does the bump's index-only advance (opencharly/plugin-task#37), so
+// calls it, and so does ff's index-only advance (opencharly/plugin-task#37), so
 // the two can never answer the same branch differently: a pin the currency report calls
-// `cur` and a pin the bump wrote are the same commit by construction.
+// `cur` and a pin `charly task ff` wrote are the same commit by construction.
 //
 // Empty means the remote does not serve that branch (or could not be reached) — the
 // loud case the caller reports, never "no information".
@@ -237,57 +235,6 @@ func remoteBranchSHA(projDir, url, branch string) string {
 		return ""
 	}
 	return f[0]
-}
-
-// remoteTagIndex maps every tag's PEELED commit to one tag name, from `git ls-remote --tags`
-// — the ONE remote tag read in this file (opencharly/opencharly#793). An annotated tag's ref
-// points at a TAG OBJECT, so the peeled `<ref>^{}` line is preferred exactly as
-// resolveUpstreamRef prefers it; comparing a commit against a tag object would report every
-// annotated tag as pointing nowhere.
-//
-// Empty on failure, and the caller then reports "no tag at served" for that repo — the same
-// thing it says for a repo with no tags. That is deliberate: the tag fact is commentary on a
-// pin, never a judge of it, so an unreachable remote must not turn the currency VERDICT red a
-// second time for a question the verdict does not rest on.
-func remoteTagIndex(projDir, url string) map[string]string {
-	idx := make(map[string]string)
-	if strings.TrimSpace(url) == "" {
-		return idx
-	}
-	out, _, exit := hostCapture(context.Background(), projDir, "git ls-remote --tags "+shellQuote(url))
-	if exit != 0 {
-		return idx
-	}
-	type ent struct{ name, sha, peeled string }
-	byName := make(map[string]*ent)
-	var order []string
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		f := strings.Fields(line)
-		if len(f) < 2 || !strings.HasPrefix(f[1], "refs/tags/") {
-			continue
-		}
-		name := strings.TrimPrefix(f[1], "refs/tags/")
-		if base, ok := strings.CutSuffix(name, "^{}"); ok {
-			if e := byName[base]; e != nil {
-				e.peeled = f[0]
-			}
-			continue
-		}
-		byName[name] = &ent{name: name, sha: f[0]}
-		order = append(order, name)
-	}
-	sort.Strings(order)
-	for _, name := range order {
-		e := byName[name]
-		sha := e.sha
-		if e.peeled != "" {
-			sha = e.peeled
-		}
-		if _, seen := idx[sha]; !seen {
-			idx[sha] = e.name
-		}
-	}
-	return idx
 }
 
 // resolveSubmoduleURL returns the URL a path's pin is read from: the url declared in
@@ -380,7 +327,7 @@ func gitlink(projDir, path string) string {
 // The DIRECTION is the whole point (opencharly/opencharly#461). `verify` reads the recorded
 // pin from the SUPERPROJECT's index (gitlink → `git ls-files -s`) and compares it against the
 // submodule checkout's HEAD, and those two values are maintained by DIFFERENT verbs:
-// `charly task sync` (git-submodules bump) MATERIALISES each advance and STAGES it
+// `charly task ff` (git-submodules ff) MATERIALISES each advance and STAGES it
 // (`git add <path>`), while the sanctioned branch workflow — `git switch -c <b> origin/main`,
 // `git reset`, `git stash pop`, an aborted commit — rewrites the index and silently UN-stages
 // those advances. The tree then holds a correctly-advanced set of pins whose index is behind
@@ -403,7 +350,7 @@ func gitlinkMismatchClass(projDir, gitArgs, path, rec, head string) (class, reme
 	}
 	if ahead, known := isAncestor(rec, head); known && ahead {
 		return "unstaged advance", fmt.Sprintf(
-			"the checkout is AHEAD of the pin the index records — `git add %s` records the advance `charly task sync` materialised, or `git submodule update %s` discards it",
+			"the checkout is AHEAD of the pin the index records — `git add %s` records the advance `charly task ff` materialised, or `git submodule update %s` discards it",
 			path, path)
 	}
 	if behind, known := isAncestor(head, rec); known && behind {
@@ -462,10 +409,10 @@ func submoduleGitlink(projDir, path, subpath string) string {
 // submoduleAt guard exists to prevent (charly#768); it decides purely on the presence of the
 // submodule's own .git, exactly as submoduleAt does before it refuses.
 //
-// WHY this is the bump's BRANCH and not its PRECONDITION (opencharly/plugin-task#37): a path
-// with no checkout is not a broken pin. Its pin lives in the SUPERPROJECT's index, and the bump
+// WHY this is ff's BRANCH and not its PRECONDITION (opencharly/plugin-task#37): a path
+// with no checkout is not a broken pin. Its pin lives in the SUPERPROJECT's index, and ff
 // advances it THERE (advancePinInIndex) - so a wave never has to materialize a repo to record
-// where that repo is pinned. A path WITH a checkout is MATERIALIZED, and the bump moves it, so
+// where that repo is pinned. A path WITH a checkout is MATERIALIZED, and ff moves it, so
 // the checkout and the index keep agreeing.
 func submoduleInitialized(projDir, path string) bool {
 	_, statErr := os.Stat(filepath.Join(projDir, path, ".git"))
@@ -552,35 +499,46 @@ func (g pinGraph) edgeSources(paths []string) []edgeRef {
 
 // runGitSubmodules maintains `.gitmodules` pins.
 //
-//	status — print PATH BRANCH PIN [DIRTY] for every submodule
-//	bump   — for pin_map entries, set the gitlink to pinned_from's twin; for the
-//	         rest, roll to their own default-branch HEAD; never a PR branch
-//	         A path WITH a checkout is rolled IN THAT CHECKOUT; a path with NO
-//	         checkout is advanced IN THE INDEX (opencharly/plugin-task#37), so a
-//	         wave never has to materialize a repo to record where it is pinned.
-//	verify — assert every derived EDGE holds (each pin_map entry equals pinned_from's
-//	         twin at that path), then
-//	         audit every `.gitmodules` path's CHECKOUT: an initialized submodule
-//	         must be clean and its HEAD must equal its recorded gitlink, read
-//	         through submoduleAt's walk-up-safe form (charly#768). A mismatch is
-//	         reported with its DIRECTION and the command that repairs it
-//	         (gitlinkMismatchClass), because the recorded gitlink lives in this
-//	         repo's INDEX while the checkout belongs to another repo and a
-//	         `charly task sync` advance that was un-staged is not a broken pin
-//	         (opencharly/opencharly#461). The recorded
-//	         GITLINK is read for EVERY declared path, before the checkout is
-//	         classified (an index read needs no checkout), so a path declared with
-//	         no gitlink FAILS. An UNINITIALIZED path (declared, a gitlink, no
-//	         checkout) is CLASSIFIED and reported in the Message, never silently
-//	         skipped and never counted as a clean checkout.
+//	status   — print PATH BRANCH PIN [DIRTY] for every submodule
+//	ff       — FAST-FORWARD every pin to the tip its intent names: for pin_map
+//	           entries, set the gitlink to pinned_from's twin; for the rest, roll
+//	           to their own default-branch HEAD; never a PR branch.
+//	           A move that is NOT a fast-forward is REFUSED: unless the checkout's
+//	           current HEAD is an ancestor of (or equal to) the target, the
+//	           submodule is left EXACTLY as it was — not switched, not staged, its
+//	           nested checkouts not reconciled — and the refusal names the path,
+//	           both commits and the direction.
+//	           A path WITH a checkout is fast-forwarded IN THAT CHECKOUT; a path
+//	           with NO checkout is advanced IN THE INDEX
+//	           (opencharly/plugin-task#37), so a wave never has to materialize a
+//	           repo to record where it is pinned.
+//	verify   — assert every derived EDGE holds (each pin_map entry equals pinned_from's
+//	           twin at that path), then
+//	           audit every `.gitmodules` path's CHECKOUT: an initialized submodule
+//	           must be clean and its HEAD must equal its recorded gitlink, read
+//	           through submoduleAt's walk-up-safe form (charly#768). A mismatch is
+//	           reported with its DIRECTION and the command that repairs it
+//	           (gitlinkMismatchClass), because the recorded gitlink lives in this
+//	           repo's INDEX while the checkout belongs to another repo and a
+//	           `charly task ff` advance that was un-staged is not a broken pin
+//	           (opencharly/opencharly#461). The recorded
+//	           GITLINK is read for EVERY declared path, before the checkout is
+//	           classified (an index read needs no checkout), so a path declared with
+//	           no gitlink FAILS. An UNINITIALIZED path (declared, a gitlink, no
+//	           checkout) is CLASSIFIED and reported in the Message, never silently
+//	           skipped and never counted as a clean checkout.
+//	currency — assert CURRENCY: the recorded gitlink must EQUAL the tip of the
+//	           branch `.gitmodules` declares (or the ref its intent names). `behind`
+//	           FAILS; so does any other state that is not current, apart from a
+//	           `differs` that no checkout could adjudicate.
 //
-// The pre-flight that once made `bump` fail loud on an uninitialized path is GONE
+// The pre-flight that once made `ff` fail loud on an uninitialized path is GONE
 // (opencharly/plugin-task#37): a path with no checkout is not a broken pin, it is a
-// path whose pin lives in the superproject's INDEX, and the bump advances it there.
+// path whose pin lives in the superproject's INDEX, and ff advances it there.
 // The invariant charly#768 protects is untouched - no git operation ever runs inside a
 // directory that has no checkout of its own, so git's walk-up to the superproject
 // stays impossible - and the run still FAILS LOUD for every path it could NOT
-// advance, because a sync over a tree it could not fully advance must never report
+// advance, because an ff over a tree it could not fully advance must never report
 // success.
 func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status, string) {
 	paths, err := gitmodulesPaths(projDir)
@@ -592,7 +550,7 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		skipped[s] = true
 	}
 	// `skipped` holds only the operator's own list - the paths this run must not
-	// touch - and both bump phases honour it. The uninitialized paths used to be
+	// touch - and both ff phases honour it. The uninitialized paths used to be
 	// pre-flighted into it as well; they are advanced IN THE INDEX now, not skipped
 	// and not fatal (opencharly/plugin-task#37).
 
@@ -622,12 +580,12 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		}
 		return spec.StatusPass, strings.TrimRight(b.String(), "\n")
 
-	case "bump":
+	case "ff":
 		// ORDER IS LOAD-BEARING (RDD): roll the non-pinned submodules FIRST — the
 		// pinned_from repo (e.g. "charly") is itself one of them — and only THEN read
 		// its gitlinks to pin the pin_map entries. The reverse order pins from the
 		// pinned repo's OLD HEAD and then advances it, leaving the edge violated after
-		// every sync.
+		// every ff.
 		//
 		// ONE FAILURE NEVER STRANDS THE REST (plugin-task#13): a per-path failure is
 		// RECORDED and the walk CONTINUES, so one contended checkout — e.g. a
@@ -686,17 +644,20 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 				pinnedFromState = "unmaterialized"
 			}
 		}
-		// Phase 1: every submodule NOT named in pin_map rolls to its default-branch HEAD.
+		// Phase 1: every submodule NOT named in pin_map is fast-forwarded to its
+		// default-branch HEAD.
 		//
-		// A MATERIALIZED path is ROLLED: its checkout is switched to the branch tip and
-		// the move is staged. A path with NO checkout is advanced IN THE INDEX: the
+		// A MATERIALIZED path is FAST-FORWARDED: its checkout is switched to the branch
+		// tip and the move is staged — and pinSubmodule REFUSES the move unless that
+		// tip descends from the checkout's current HEAD, leaving that submodule exactly
+		// as it was. A path with NO checkout is advanced IN THE INDEX: the
 		// branch tip is read from the REMOTE (remoteBranchSHA) and recorded with
 		// `git update-index --add --cacheinfo 160000,<sha>,<path>` (advancePinInIndex)
 		// — the pin IS the index entry, so a wave never has to materialize a repo to
 		// record where that repo is pinned (opencharly/plugin-task#37). The checkout,
 		// when one is later materialized, is brought to that pin by
 		// `git submodule update --init <path>`, which is why the order after a wave is
-		// sync -> init -> verify.
+		// ff -> init -> verify.
 		for _, p := range paths {
 			if skipped[p] {
 				continue
@@ -888,7 +849,7 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		// classified by DIRECTION with its remedy (gitlinkMismatchClass), because
 		// "checkout ahead of the index" and "checkout behind the index" are different
 		// defects with opposite repairs, and reporting both as `HEAD != gitlink`
-		// turned `charly task sync`'s own un-staged advance into a phantom break
+		// turned `charly task ff`'s own un-staged advance into a phantom break
 		// (opencharly/opencharly#461).
 		// Reads go through submoduleAt's walk-up-safe `--git-dir`/`--work-tree` form
 		// (charly#768), so a present-but-uninitialized directory can never resolve to
@@ -973,49 +934,24 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		// ends while both ends were stale, which is precisely how it held on five stale
 		// distros.
 		//
-		// The FAILURE set is the STRUCTURAL one, and "structural" means exactly this: a pin the
-		// workflow cannot JUDGE, or two sides that DISAGREE — including a `blocked-by` that
-		// names NO leg (a source that is not a declared pin, or a twin its source declares no
-		// ref for), because there is then no producer to wait for. Everything judged and merely
-		// not-yet-advanced PASSES and is reported, so `behind`, `not-on-the-served-line` and a
-		// `blocked-by` that DOES name a leg are legs of a
-		// cross-repo sequence whose next step is another repo's PR, and a gate that failed
-		// on them would be permanently red — which trains every reader to ignore it, the
-		// mirror problem inverted. So the Message LEADS with the number of pins that are
-		// not current, and a green run can never read as "everything is fine".
+		// The FAILURE set is the STRUCTURAL one PLUS every pin that is not CURRENT.
+		// "Structural" still means exactly this: a pin the workflow cannot JUDGE, or two
+		// sides that DISAGREE — including a `blocked-by` that names NO leg (a source that
+		// is not a declared pin, or a twin its source declares no ref for), because there
+		// is then no producer to wait for. And now `behind`, `not-on-the-served-line` and a
+		// `blocked-by` that DOES name a real producer leg FAIL too: in every one of them
+		// this repo does NOT hold the tip its intent names, which is the whole claim
+		// currency makes. The remedy is named: `charly task ff`.
 		//
-		// The owner's own bound on its OWN bookkeeping, opt-in (`stale_after`). It answers the
-		// question the currency report cannot: a pin that is not current is CHURN (a busy
-		// upstream is behind between every wave), but a pin that is not current AND that this
-		// repo has not advanced for longer than the bound is NEGLECT. The bound is on the AGE
-		// of this repo's last advance of that path — NOT on the pin's distance from the ref it
-		// names. A gate on the DISTANCE would be permanently red on a healthy tree, which
-		// trains every reader to ignore it; the AGE is what neglect looks like, and it is
-		// what a healthy tree keeps small.
-		var staleAfter time.Duration
-		staleBoundSet := false
-		if raw := strings.TrimSpace(in.StaleAfter); raw != "" {
-			d, err := time.ParseDuration(raw)
-			if err != nil {
-				return spec.StatusFail, fmt.Sprintf(
-					"git-submodules: stale_after %q is not a duration this verb can parse (e.g. \"168h\")", raw)
-			}
-			// A bound of zero or less is not a bound: it marks EVERY not-current pin
-			// stale, which is the permanently-red gate this knob exists to avoid. The
-			// validator's round-1 observation named it, and it is refused here rather
-			// than left to the operator's discretion.
-			if d <= 0 {
-				return spec.StatusFail, fmt.Sprintf(
-					"git-submodules: stale_after %q is not a POSITIVE duration — a bound of zero or less marks every not-current pin stale, which is the permanently-red gate this bound exists to avoid", raw)
-			}
-			staleAfter, staleBoundSet = d, true
-		}
+		// The ONE reported non-failure is `differs (no checkout to judge ancestry)`: it is
+		// genuinely UNJUDGEABLE — a light tree records the pin but holds no objects for it,
+		// so nothing can say whether the pin is behind, ahead or unrelated. Manufacturing a
+		// red on evidence the workflow cannot read is the same defect as manufacturing a
+		// green. The Message still LEADS with the number of pins that are not current, so
+		// even that state is visible, and a green run can never read as "everything is
+		// fine".
 		type pin struct {
 			path, intent, recorded, served, which, state string
-			// tag is the tag that points at the SERVED commit, empty when none does
-			// (opencharly/opencharly#793). It is a FACT reported beside the pin, never the
-			// gate's verdict: `design-pintag` owns the states that explain an untagged pin.
-			tag string
 		}
 		type classified struct {
 			pin
@@ -1053,38 +989,21 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 			}
 			return "not-on-the-served-line", ""
 		}
-		// squashWhy is the explanation BOTH paths attach to that class. It is not a defect and
-		// must not be a FAILURE: a SQUASH-MERGED branch advances without descending from its
-		// previous head, so a pin taken before the merge is unreachable from the served ref —
-		// MEASURED on the real umbrella (`charly`, whose own merge style is squash, and
-		// `layer-charly-internals`), where a first cut that called it a divergence went red on
-		// a healthy tree. A hand-pin to an unrelated commit yields the SAME two SHAs, so the
-		// objects cannot tell the two apart; the honest report is the class plus the one remedy
-		// that is right for both — advance the pin, which is what `task sync` does.
-		squashWhy := "a squash-merged branch advances without descending from its previous head, and a hand-pin looks identical; advance the pin either way"
-		// The TAG fact (opencharly/opencharly#793): whether a tag points at the SERVED commit,
-		// which the report never said — so a body could call a pin "merged and tagged" with no
-		// part of the answer disagreeing. Asked once per URL (every pin of one repo shares the
-		// answer) and reported as a FACT, never as a verdict: `design-pintag` owns the states
-		// that explain an untagged pin (a CHANGELOG tip one commit above its tag, a recorded
-		// exception), and this report must not grow a second policy.
-		tagIdx := map[string]map[string]string{}
-		tagAt := func(url, sha string) string {
-			if url == "" || sha == "" {
-				return ""
-			}
-			idx, ok := tagIdx[url]
-			if !ok {
-				idx = remoteTagIndex(projDir, url)
-				tagIdx[url] = idx
-			}
-			return idx[sha]
-		}
+		// squashWhy is the explanation BOTH paths attach to that class. It IS a failure: a
+		// SQUASH-MERGED branch advances without descending from its previous head, so a pin
+		// taken before the merge is unreachable from the served ref — MEASURED on the real
+		// umbrella (`charly`, whose own merge style is squash, and
+		// `layer-charly-internals`). A hand-pin to an unrelated commit yields the SAME two
+		// SHAs, so the objects cannot tell the two apart; the honest report is the class plus
+		// the one remedy that is right for both — advance the pin. A pin whose OWN checkout
+		// carries work the target does not descend from makes `charly task ff` refuse, and
+		// the refusal names the producer to advance first.
+		squashWhy := "a squash-merged branch advances without descending from its previous head, and a hand-pin looks identical; either way the pin does not hold the tip the branch declares, so advance it — `charly task ff` refuses a non-fast-forward and names the producer to advance first"
 		var rows []classified
 		var structural []string
 		stateOf := map[string]string{}
 
-		// intentOf states IMPLICIT intents rather than leaving them unstated: `bump`
+		// intentOf states IMPLICIT intents rather than leaving them unstated: `ff`
 		// rolls every path not in pin_map to its own default-branch HEAD, so that IS the
 		// intent of such a path — it was simply never written down. A path with neither an
 		// intent nor a `branch=` cannot be judged at all, and says so.
@@ -1106,81 +1025,6 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 				ref = ref[:i]
 			}
 			return strings.TrimSpace(ref)
-		}
-
-		// durText renders a bound or an age in the OWNER's own units: whole hours as "168h",
-		// so the report echoes the bound the owner wrote rather than a Go duration literal.
-		durText := func(d time.Duration) string {
-			if d%time.Hour == 0 {
-				return fmt.Sprintf("%dh", int(d/time.Hour))
-			}
-			return d.String()
-		}
-
-		// staleEligible names the states that mean "THIS repo's own pin does not hold the
-		// value its intent names" — the only states whose neglect is THIS repo's business.
-		// An EDGE that is `blocked-by` is NOT eligible: the producer's neglect is the
-		// producer's business, and failing here over another repo's PR would be exactly the
-		// permanently-red gate the org's pin rule forbids.
-		staleEligible := func(state string) bool {
-			switch {
-			case state == "behind", state == "not-on-the-served-line":
-				return true
-			case strings.HasPrefix(state, "differs"):
-				// The recorded value differs from the served one and no checkout was
-				// available to classify the difference. It is still NOT CURRENT.
-				return true
-			}
-			return false
-		}
-
-		// lastAdvancedAt reads the AGE of this repo's OWN bookkeeping for a pin: the
-		// timestamp of the last commit that touched the pin's path. This is the owner's own
-		// record of when it last advanced the pin — never the pin's distance from the served
-		// ref, which is churn.
-		//
-		// The THREE outcomes are different and must not be conflated, because they mean
-		// different things and only ONE of them is a claim about the pin:
-		//   * a TIMESTAMP — the age, measured;
-		//   * an EMPTY result — the path is in no commit of this repo's history, so this
-		//     repo has never advanced it: its age is unbounded and it IS neglected;
-		//   * a FAILING read — the age could not be measured at all (a broken object
-		//     store, a transient git failure). That is the workflow being unable to JUDGE
-		//     the pin, and it is reported as such — never as neglect, which would be a
-		//     claim the evidence does not support.
-		// The validator's round-1 observation named the conflation; the outcomes are now
-		// separate.
-		//
-		// A repo with NO COMMIT AT ALL is the third case, and it is a FACT rather than a
-		// failure: `git log` refuses on an unborn HEAD, but the refusal means "there is
-		// no history here", which is exactly the "never advanced" claim. It is told apart
-		// from a genuine read failure by COUNTING the repo's commits: zero commits means
-		// there is nothing here to have advanced anything (a fact), while a count that
-		// cannot be produced, or a history that exists but whose age for this path cannot
-		// be read, is a failure to JUDGE.
-		lastAdvancedAt := func(p string) (at time.Time, how, detail string) {
-			out, errOut, exit := hostCapture(context.Background(), projDir,
-				fmt.Sprintf("git log -1 --format=%%ct -- %s", shellQuote(p)))
-			if exit != 0 {
-				cOut, cErr, cExit := hostCapture(context.Background(), projDir, "git rev-list --all --count")
-				if cExit != 0 {
-					return time.Time{}, "read-failed", firstLine(cErr)
-				}
-				if n, perr := strconv.Atoi(strings.TrimSpace(cOut)); perr == nil && n == 0 {
-					// This repo has no commit at all: nothing was ever advanced here.
-					return time.Time{}, "no-history", ""
-				}
-				return time.Time{}, "read-failed", firstLine(errOut)
-			}
-			ts := strings.TrimSpace(out)
-			if ts == "" {
-				return time.Time{}, "no-history", ""
-			}
-			secs, err := strconv.ParseInt(ts, 10, 64)
-			if err != nil {
-				return time.Time{}, "read-failed", "unparsable timestamp " + strconv.Quote(ts)
-			}
-			return time.Unix(secs, 0), "ok", ""
 		}
 
 		// THE GRAPH, classified once for EVERY path, then the depth rule walked over EVERY
@@ -1224,12 +1068,6 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 				}
 				served, which := resolveUpstreamRef(projDir, url, refOf(intent))
 				r.served, r.which = served, which
-				if which == "tag" {
-					// The intent named the tag itself, so that tag IS the fact.
-					r.tag = refOf(intent)
-				} else {
-					r.tag = tagAt(url, served)
-				}
 				switch {
 				case served == "":
 					r.state = "ref-not-served"
@@ -1391,43 +1229,6 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 			// guard is what retired it. Recording it anyway is the write-only state R2 deletes.
 		}
 
-		// The NEGLECT judgement (opt-in). A pin that is not current AND that this repo has
-		// not advanced for longer than the owner's bound is STALE, and it FAILS. The bound
-		// is on this repo's OWN bookkeeping age, so a healthy tree stays green while a
-		// neglected one goes red — the two regimes the bound is calibrated against.
-		var stale []string
-		if staleBoundSet {
-			now := time.Now()
-			for _, r := range rows {
-				if !r.leaf || !staleEligible(r.state) {
-					continue
-				}
-				at, how, detail := lastAdvancedAt(r.path)
-				switch how {
-				case "read-failed":
-					// The age could not be measured. That is the workflow being unable to
-					// JUDGE the pin — a structural-class failure that names the read
-					// error — and NOT a claim that the pin is neglected. A transient git
-					// error must never manufacture a stale verdict.
-					structural = append(structural, fmt.Sprintf(
-						"%s: the age of this repo's own last advance of it could not be read (%s) — the staleness of this pin cannot be judged",
-						r.path, detail))
-					continue
-				case "no-history":
-					stale = append(stale, fmt.Sprintf(
-						"%s: %s, and this repo's own history records no advance of it — it has never been advanced here",
-						r.path, r.state))
-					continue
-				}
-				age := now.Sub(at)
-				if age > staleAfter {
-					stale = append(stale, fmt.Sprintf(
-						"%s: %s, and this repo has not advanced it for %s (bound %s) — advance it: mode=bump advances every pin to the ref its intent names",
-						r.path, r.state, durText(age.Round(time.Hour)), durText(staleAfter)))
-				}
-			}
-		}
-
 		// Render: the count of pins that are NOT current leads, because a green run must
 		// never be readable as "everything is fine".
 		byState := map[string]int{}
@@ -1472,13 +1273,6 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 			if r.which != "" {
 				d += " (" + r.which + ")"
 			}
-			if r.leaf && r.served != "" {
-				if r.tag != "" {
-					d += "; tag " + r.tag
-				} else {
-					d += "; no tag at served"
-				}
-			}
 			detail = append(detail, d)
 		}
 
@@ -1504,38 +1298,38 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 		}
 		head := fmt.Sprintf("currency: %d of %d pin(s) NOT current [%s]; intents: %d upstream leaf/leaves (%d implicit), %d derived-from edge(s)",
 			notCur, len(rows), strings.Join(tally, ", "), leaves, implicit, derived)
-		// The tag tally answers the question even when nothing is behind: a run that read
-		// "0 NOT current" said nothing about tags, which is how "merged and tagged" survived.
-		leafTagged, leafUntagged := 0, 0
-		for _, r := range rows {
-			if !r.leaf || r.served == "" {
-				continue
-			}
-			if r.tag != "" {
-				leafTagged++
-			} else {
-				leafUntagged++
-			}
-		}
-		if leafTagged+leafUntagged > 0 {
-			head += fmt.Sprintf("; tags at served: %d of %d leaf pin(s) (%d without — a CHANGELOG tip sits one commit above its tag, which design-pintag judges)",
-				leafTagged, leafTagged+leafUntagged, leafUntagged)
-		}
 		if len(detail) > 0 {
 			head += "; NOT CURRENT: " + strings.Join(detail, "; ")
 		}
-		if len(stale) > 0 {
-			head += fmt.Sprintf("; %d STALE pin(s) (neglected for more than %s): %s",
-				len(stale), durText(staleAfter), strings.Join(stale, "; "))
+		// Every pin that is not CURRENT is a FAILURE — `behind`, `not-on-the-served-line` and
+		// a `blocked-by` leg all mean this repo does not hold the tip its intent names — with
+		// ONE exception: `differs (no checkout to judge ancestry)` is UNJUDGEABLE, and a red
+		// manufactured over evidence the workflow cannot read is as dishonest as a green. The
+		// same holds for a `pin_map` edge whose TWIN cannot be adjudicated because the twin's
+		// checkout is absent (the state is nested inside its `blocked-by`); a light tree must
+		// never manufacture a red it cannot prove. The head above already counts both as not
+		// current, so neither is invisible.
+		unjudgeable := func(state string) bool {
+			if strings.HasPrefix(state, "differs") {
+				return true
+			}
+			return strings.HasPrefix(state, "blocked-by") && strings.Contains(state, "(differs")
 		}
+		failing := 0
+		for _, r := range rows {
+			if r.state != "cur" && !unjudgeable(r.state) {
+				failing++
+			}
+		}
+		remedy := "remedy: `charly task ff` fast-forwards every pin to the tip its intent names"
 		if len(structural) > 0 {
 			sort.Strings(structural)
-			return spec.StatusFail, fmt.Sprintf("%s; %d STRUCTURAL failure(s): %s; producer-first legs: %s",
-				head, len(structural), strings.Join(structural, "; "), legText)
+			return spec.StatusFail, fmt.Sprintf("%s; %d STRUCTURAL failure(s): %s; %s; producer-first legs: %s",
+				head, len(structural), strings.Join(structural, "; "), remedy, legText)
 		}
-		if len(stale) > 0 {
-			return spec.StatusFail, fmt.Sprintf("%s; FAILED on the STALE pin(s) above; producer-first legs: %s",
-				head, legText)
+		if failing > 0 {
+			return spec.StatusFail, fmt.Sprintf("%s; %d pin(s) are NOT CURRENT and FAIL: %s; producer-first legs: %s",
+				head, failing, remedy, legText)
 		}
 		return spec.StatusPass, fmt.Sprintf("%s; producer-first legs: %s", head, legText)
 
@@ -1553,7 +1347,7 @@ func runGitSubmodules(projDir string, in params.GitSubmodulesInput) (spec.Status
 // created `git worktree` that has not run `git submodule update --init` — git
 // WALKS UP to the enclosing repository and resolves to the SUPERPROJECT, so a
 // `git -C <empty-submodule-dir> switch --detach <ref>` silently switched the
-// UMBRELLA (detaching `charly task sync`'s caller from its branch). The
+// UMBRELLA (detaching `charly task ff`'s caller from its branch). The
 // `--git-dir`/`--work-tree` form cannot walk up: a stray directory resolves to
 // nothing (exit 128), never to the parent.
 func submoduleAt(projDir, path string) (abs, gitArgs string, err error) {
@@ -1567,10 +1361,20 @@ func submoduleAt(projDir, path string) (abs, gitArgs string, err error) {
 	return abs, fmt.Sprintf("--git-dir=%s --work-tree=%s", shellQuote(dotgit), shellQuote(abs)), nil
 }
 
-// pinSubmodule fetches ref (falling back to an explicit SHA fetch for a shallow
-// clone — the exact failure sync-gitlinks.sh documents), detaches, and stages.
+// pinSubmodule FAST-FORWARDS ref (falling back to an explicit SHA fetch for a shallow
+// clone — the exact failure a shallow clone produces), then detaches and stages.
 // It refuses an uninitialized submodule (charly#768) and drives the checkout
 // through submoduleAt's walk-up-safe `--git-dir`/`--work-tree` form.
+//
+// IT ONLY EVER ADVANCES. Before anything moves, the target commit is resolved and the
+// checkout's current HEAD must be an ancestor of it — or already equal to it. Otherwise
+// the move is REFUSED, because a detached HEAD's local commit does not survive a
+// `git switch --detach` onto an unrelated tip: MEASURED, that switch exits 0 and leaves
+// the commit in ZERO refs (the reflog alone). The refusal names the path, both commits
+// and the direction, and leaves THIS SUBMODULE exactly as it was: not switched, not
+// staged, its nested checkouts not reconciled. It applies to BOTH ff phases — a leaf
+// roll and a `pin_map` edge — so an edge whose twin is BEHIND the checkout's HEAD is
+// refused the same way (the producer must advance first) instead of rewinding.
 //
 // The fetch and the switch are TWO commands, because the NESTED CHECKOUTS ARE JUDGED
 // between them (opencharly/plugin-task#54): the reconcile moves them, and a move that
@@ -1579,11 +1383,11 @@ func submoduleAt(projDir, path string) (abs, gitArgs string, err error) {
 // checkout is not switched, its pin is not staged, and the nested checkout still holds
 // the operator's commit.
 //
-// The refusal is PER-SUBMODULE, and that is the bump's failure contract
+// The refusal is PER-SUBMODULE, and that is ff's failure contract
 // (opencharly/plugin-task#13): the walk collects a failed path and CONTINUES, so a path
 // that sorts earlier has already been rolled and staged by the time this one is refused,
 // and a path that sorts LATER still rolls after it. The scope is held MECHANICALLY by
-// TestGitSubmodules_BumpRefusalIsScopedToTheRefusedSubmodule, whose fixture refuses the
+// TestGitSubmodules_FFRefusalIsScopedToTheRefusedSubmodule, whose fixture refuses the
 // FIRST path and asserts that the LATER one still rolled — the order is what makes the
 // scope observable, and the test asserts the order.
 // The refusal names the nested checkout that carries the work, and the report says how
@@ -1602,11 +1406,41 @@ func pinSubmodule(projDir, path, ref string) (spec.Status, string) {
 	if exit != 0 {
 		return spec.StatusFail, fmt.Sprintf("pin %s -> %s failed: %s", path, ref, strings.TrimSpace(stderr))
 	}
+	// THE FAST-FORWARD GATE — before the nested judgement, before the switch, before
+	// anything is written. The target is resolved HERE (never inferred from `ref`, which
+	// may be a SHA an edge read from another tree), and an unborn HEAD has no commit to
+	// lose, so only a HEAD that EXISTS is judged.
+	target, _, texit := hostCapture(context.Background(), projDir,
+		fmt.Sprintf("git %s rev-parse %s^{commit}", gitArgs, shellQuote(ref)))
+	if texit != 0 || strings.TrimSpace(target) == "" {
+		return spec.StatusFail, fmt.Sprintf("pin %s -> %s failed: its target commit cannot be resolved in that checkout",
+			path, ref)
+	}
+	target = strings.TrimSpace(target)
+	head, _, hexit := hostCapture(context.Background(), projDir,
+		fmt.Sprintf("git %s rev-parse --verify HEAD", gitArgs))
+	head = strings.TrimSpace(head)
+	if hexit == 0 && head != "" && head != target {
+		_, _, aexit := hostCapture(context.Background(), projDir,
+			fmt.Sprintf("git %s merge-base --is-ancestor %s %s", gitArgs, shellQuote(head), shellQuote(target)))
+		switch aexit {
+		case 0:
+			// A fast-forward: the checkout's HEAD survives the move as an ancestor.
+		case 1:
+			return spec.StatusFail, fmt.Sprintf(
+				"refused to move %s: its checkout is at %s, which is NOT an ancestor of %s (the target) — a fast-forward only advances; push, branch or stash the work at HEAD, or advance the producer first",
+				path, head, target)
+		default:
+			return spec.StatusFail, fmt.Sprintf(
+				"pin %s -> %s failed: whether %s is an ancestor of %s could not be judged in that checkout",
+				path, ref, head, target)
+		}
+	}
 	// JUDGE THE NESTED CHECKOUTS, before this checkout moves and before the pin is
 	// staged. The reconcile below moves them with `git submodule update --recursive`,
 	// and that move does not ask: it takes a nested checkout off the commit it is at
-	// even when that commit carries work nothing else references. A bump that drops
-	// the operator's work is worse than a bump that refuses, so the work is judged
+	// even when that commit carries work nothing else references. A move that drops
+	// the operator's work is worse than one that refuses, so the work is judged
 	// here and a refusal stops THIS SUBMODULE with its tree untouched: the checkout
 	// is not switched, the pin is not staged, and the nested checkout still holds the
 	// operator's commit. It does not stop the walk (opencharly/plugin-task#13).
@@ -1627,10 +1461,10 @@ func pinSubmodule(projDir, path, ref string) (spec.Status, string) {
 	// submodule's gitlink moves the PIN; it does not move the submodule's OWN
 	// initialized nested checkouts, which stay at the gitlinks the OLD commit
 	// recorded — so the shared tree goes dirty (` M <nested>`) and
-	// `git-submodules verify` then fails twice over, on a change this very bump just
+	// `git-submodules verify` then fails twice over, on a change this very ff just
 	// made. The reconciliation is recursive (a nested checkout can itself nest) and a
-	// failure to complete it is a hard error: a bump that leaves the tree dirty is
-	// worse than a bump that refuses. What the move would DESTROY was judged before
+	// failure to complete it is a hard error: an ff that leaves the tree dirty is
+	// worse than one that refuses. What the move would DESTROY was judged before
 	// the switch (judgeNestedLevel), so this step only ever moves checkouts whose
 	// work survives the move.
 	if st, msg := reconcileNestedCheckouts(projDir, path); st != spec.StatusPass {
@@ -1717,7 +1551,7 @@ func treeGitlinks(gitArgs, commit string) (links map[string]string, ok bool) {
 // its pin is not staged. The scope is the refused submodule and NOT the tree: the walk
 // continues past a failed path (opencharly/plugin-task#13), and a path that sorts
 // earlier has already been rolled and staged (opencharly/plugin-task#56). The scope is
-// held by TestGitSubmodules_BumpRefusalIsScopedToTheRefusedSubmodule.
+// held by TestGitSubmodules_FFRefusalIsScopedToTheRefusedSubmodule.
 func judgeNestedLevel(dir, gitArgs, target, label string) (spec.Status, string) {
 	links, ok := treeGitlinks(gitArgs, target)
 	paths := make([]string, 0, len(links))
@@ -1775,7 +1609,7 @@ func judgeNestedLevel(dir, gitArgs, target, label string) (spec.Status, string) 
 // So the checkout may be moved when the commit it is at will still be reachable: when
 // the move goes FORWARD onto it (it is an ancestor of the recorded gitlink) or when a
 // ref in that checkout still contains it (the commit survives the move on that ref).
-// Otherwise the bump REFUSES, naming the path.
+// Otherwise ff REFUSES, naming the path.
 //
 // The ancestry arm is decisive only when the recorded commit is present locally; when
 // it is not, the ref arm decides, and the refusal says the pin was unreadable.
@@ -1837,9 +1671,9 @@ func pinNote(rec string) string {
 //   - the update is `--recursive` WITHOUT `--init`: it moves the nested checkouts that are
 //     ALREADY INITIALIZED — exactly what the issue reports going stale — and never
 //     initializes a nested submodule the operator did not ask for. That matters beyond
-//     tidiness: `--init` would fetch nested remotes on every bump (including file-protocol
+//     tidiness: `--init` would fetch nested remotes on every ff (including file-protocol
 //     fixtures, which would need a protocol loosening this verb must not bake in), and a
-//     bump is not the place to grow the checkout. The recursion is still there because a
+//     ff is not the place to grow the checkout. The recursion is still there because a
 //     nested checkout can itself nest;
 //   - what the update would DESTROY is judged BEFORE it runs (judgeNestedLevel, called
 //     from pinSubmodule before the switch): the update moves a nested checkout off a
@@ -1847,8 +1681,8 @@ func pinNote(rec string) string {
 //     (opencharly/plugin-task#54), so the work is judged up front and a checkout that
 //     carries it is never moved.
 //
-// A reconcile that cannot complete is a hard error, not a warning: a bump that leaves the
-// tree dirty is worse than a bump that refuses (this is the defect itself).
+// A reconcile that cannot complete is a hard error, not a warning: an ff that leaves the
+// tree dirty is worse than one that refuses (this is the defect itself).
 func reconcileNestedCheckouts(projDir, path string) (spec.Status, string) {
 	abs, _, aerr := submoduleAt(projDir, path)
 	if aerr != nil {

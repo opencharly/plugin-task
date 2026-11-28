@@ -142,13 +142,13 @@ func TestHopTasks_FailurePathUnchanged(t *testing.T) {
 	}
 	defer func() { verbResolverFor = old }()
 
-	ts := hopTaskSet(t.TempDir(), "pins", "bump the pins")
+	ts := hopTaskSet(t.TempDir(), "pins", "advance the pins")
 
 	st, msg := hopTasks(context.Background(), nil, ts, "pins", nil)
 	if st != spec.StatusFail {
 		t.Fatalf("a failed nested task must yield FAIL, got %s", st)
 	}
-	for _, want := range []string{`task "pins" failed`, "1 step(s) failed", "[fail] run — bump the pins", "leaf-reason: boom"} {
+	for _, want := range []string{`task "pins" failed`, "1 step(s) failed", "[fail] run — advance the pins", "leaf-reason: boom"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("missing %q in the nested verdict, got:\n%s", want, msg)
 		}

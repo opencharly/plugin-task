@@ -272,11 +272,11 @@ for repo in src umb; do
   git update-index --add --cacheinfo "160000,$SHA,target"
   G commit -qm "pin target"
 done
-# Check out the umb submodule so `bump` can git-switch it.
+# Check out the umb submodule so `ff` can git-switch it.
 (cd "$FIX/umb" && git -c protocol.file.allow=always submodule update --init -q target)
 
-# --- bump-order fixture: `src` is ITSELF a rolling submodule of `umb2`, stale, and
-# its `inner` gitlink advances during the bump. `target2` must be pinned from src's
+# --- ff-order fixture: `src` is ITSELF a rolling submodule of `umb2`, stale, and
+# its `inner` gitlink advances during the ff. `target2` must be pinned from src's
 # NEW gitlink. A wrong order would pin target2 from src's OLD gitlink and then
 # advance src, violating the edge.
 (
@@ -317,13 +317,13 @@ pins-verify:
       - check: the pin holds
         git-submodules: {mode: verify, pinned_from: ../src, pin_map: {target: target}}
         context: [runtime]
-pins-bump:
+pins-ff:
   task:
-    description: bump the target pin from src
+    description: fast-forward the target pin from src
     dir: .
     plan:
-      - run: bump
-        git-submodules: {mode: bump, pinned_from: ../src, pin_map: {target: target}}
+      - run: fast-forward
+        git-submodules: {mode: ff, pinned_from: ../src, pin_map: {target: target}}
         context: [deploy]
 pins-verify-nested:
   task:
@@ -392,16 +392,16 @@ prune:
         context: [deploy]
 YML
 
-# A second project exercising the LOAD-BEARING bump order (pinned_from is itself a
+# A second project exercising the LOAD-BEARING ff order (pinned_from is itself a
 # rolling stale submodule).
 cat > "$FIX/umb2/charly.yml" <<'YML'
-order-bump:
+order-ff:
   task:
-    description: bump target2 from src (which itself rolls first)
+    description: fast-forward target2 from src (which itself rolls first)
     dir: .
     plan:
-      - run: bump
-        git-submodules: {mode: bump, pinned_from: src, pin_map: {target2: inner}}
+      - run: fast-forward
+        git-submodules: {mode: ff, pinned_from: src, pin_map: {target2: inner}}
         context: [deploy]
 currency:
   task:
@@ -443,14 +443,14 @@ printf 'package m1\n\nimport _ "github.com/opencharly/sdk"\n' > tools/m1/m1.go
 echo "== verb:git-submodules verify (stale -> must FAIL) =="
 if "$CH" task pins-verify; then echo "FAIL: stale pin must fail verify" >&2; exit 1; fi
 
-echo "== verb:git-submodules bump (must move the pin to src's twin) =="
-bump_out="$("$CH" task pins-bump)"; echo "$bump_out" | grep -q '0 failed' || { echo "FAIL: bump did not run" >&2; exit 1; }
+echo "== verb:git-submodules ff (must move the pin to src's twin) =="
+ff_out="$("$CH" task pins-ff)"; echo "$ff_out" | grep -q '0 failed' || { echo "FAIL: ff did not run" >&2; exit 1; }
 want="$(git -C "$FIX/src" ls-tree HEAD target | awk '{print $3}')"
 got="$(git ls-files -s target | awk '{print $2}')"
-[ "$want" = "$got" ] || { echo "FAIL: bump did not adopt src's pin ($got != $want)" >&2; exit 1; }
+[ "$want" = "$got" ] || { echo "FAIL: ff did not adopt src's pin ($got != $want)" >&2; exit 1; }
 
 echo "== verb:git-submodules verify (now current -> must PASS) =="
-verify_out="$("$CH" task pins-verify)"; echo "$verify_out" | grep -q '0 failed' || { echo "FAIL: verify must pass after bump" >&2; exit 1; }
+verify_out="$("$CH" task pins-verify)"; echo "$verify_out" | grep -q '0 failed' || { echo "FAIL: verify must pass after ff" >&2; exit 1; }
 
 # --- The nested `task:` hop carries a PASSING nested run's OWN report
 # (opencharly/plugin-task#33). The hop used to answer with the bare aggregate
@@ -477,9 +477,9 @@ echo "   the composite carried the nested pin report across the hop"
 echo "== verb:git-submodules verify (missing twin -> must FAIL loudly, never vacuous) =="
 if "$CH" task missing-pin; then echo "FAIL: a missing gitlink must fail verify" >&2; exit 1; fi
 
-echo "== verb:git-submodules bump (unmaterialized submodule -> the pin advances IN THE INDEX, no checkout) =="
+echo "== verb:git-submodules ff (unmaterialized submodule -> the pin advances IN THE INDEX, no checkout) =="
 # opencharly/plugin-task#37: a declared path with NO CHECKOUT is not a broken pin. The
-# bump advances its pin in the SUPERPROJECT's INDEX, to the tip the remote serves, and
+# ff advances its pin in the SUPERPROJECT's INDEX, to the tip the remote serves, and
 # materializes NOTHING — so a pin wave never has to clone 400 repos to record where
 # they are pinned. The fixture pins the STALE sha (C1) so the advance to C2 is
 # observable, and charly#768's invariant is asserted too: no git operation runs inside
@@ -494,13 +494,13 @@ UNI="$WORK/uninit"; mkdir -p "$UNI"
   mkdir -p gap   # present-but-UNINITIALIZED
 )
 cat > "$UNI/charly.yml" <<'YML'
-bump-all:
+ff-all:
   task:
-    description: bump over a set containing an unmaterialized submodule
+    description: fast-forward over a set containing an unmaterialized submodule
     dir: .
     plan:
-      - run: bump
-        git-submodules: {mode: bump}
+      - run: fast-forward
+        git-submodules: {mode: ff}
         context: [deploy]
 status-all:
   task:
@@ -513,13 +513,13 @@ status-all:
 YML
 umb_head_before="$(git -C "$UNI" rev-parse HEAD)"
 umb_branch_before="$(git -C "$UNI" rev-parse --abbrev-ref HEAD)"
-bump_uni_out="$(cd "$UNI" && "$CH" task bump-all 2>&1)" || {
-  echo "FAIL: a bump over an unmaterialized path must PASS, not fail the run" >&2
-  printf '%s\n' "$bump_uni_out" >&2; exit 1; }
-printf '%s\n' "$bump_uni_out" | sed 's/^/   | /'
+ff_uni_out="$(cd "$UNI" && "$CH" task ff-all 2>&1)" || {
+  echo "FAIL: an ff over an unmaterialized path must PASS, not fail the run" >&2
+  printf '%s\n' "$ff_uni_out" >&2; exit 1; }
+printf '%s\n' "$ff_uni_out" | sed 's/^/   | /'
 gap_got="$(git -C "$UNI" ls-files -s gap | awk '{print $2}')"
 [ "$gap_got" = "$C2" ] || { echo "FAIL: the unmaterialized pin was not advanced in the index ($gap_got != $C2)" >&2; exit 1; }
-[ -e "$UNI/gap/.git" ] && { echo "FAIL: the bump materialized 'gap' — the pin belongs in the index" >&2; exit 1; }
+[ -e "$UNI/gap/.git" ] && { echo "FAIL: the ff materialized 'gap' — the pin belongs in the index" >&2; exit 1; }
 umb_head_after="$(git -C "$UNI" rev-parse HEAD)"
 umb_branch_after="$(git -C "$UNI" rev-parse --abbrev-ref HEAD)"
 [ "$umb_head_before" = "$umb_head_after" ] || { echo "FAIL: the umbrella HEAD moved (walk-up detach): $umb_head_before -> $umb_head_after" >&2; exit 1; }
@@ -540,7 +540,7 @@ if echo "$status_out" | grep -q "$umb_short"; then
 fi
 echo "   status reported '- (uninitialized)'; umbrella HEAD ($umb_short) not leaked as a pin"
 
-echo "== verb:git-submodules bump (pinned_from with NO CHECKOUT and no 'branch=' -> the refusal names the missing checkout) =="
+echo "== verb:git-submodules ff (pinned_from with NO CHECKOUT and no 'branch=' -> the refusal names the missing checkout) =="
 # opencharly/plugin-task#39: the source's state is classified by the CHECKOUT, not by
 # the ROLL. A source that has no checkout AND declares no `branch=` leaves phase 1
 # before the roll, so the roll-based classification reported it as a STALE source and
@@ -558,17 +558,17 @@ NOSRC="$WORK/nosrc"; mkdir -p "$NOSRC"
   mkdir -p src target   # present-but-UNINITIALIZED, and `src` declares NO `branch=`
 )
 cat > "$NOSRC/charly.yml" <<'YML'
-bump-from-source:
+ff-from-source:
   task:
-    description: bump the pin_map entry from a source that has no checkout
+    description: fast-forward the pin_map entry from a source that has no checkout
     dir: .
     plan:
-      - run: bump
-        git-submodules: {mode: bump, pinned_from: src, pin_map: {target: inner}}
+      - run: fast-forward
+        git-submodules: {mode: ff, pinned_from: src, pin_map: {target: inner}}
         context: [deploy]
 YML
-if nosrc_out="$(cd "$NOSRC" && "$CH" task bump-from-source 2>&1)"; then
-  echo "FAIL: a bump whose pinned_from has no checkout must FAIL" >&2
+if nosrc_out="$(cd "$NOSRC" && "$CH" task ff-from-source 2>&1)"; then
+  echo "FAIL: an ff whose pinned_from has no checkout must FAIL" >&2
   printf '%s\n' "$nosrc_out" >&2; exit 1
 fi
 printf '%s\n' "$nosrc_out" | sed 's/^/   | /'
@@ -581,20 +581,20 @@ if printf '%s\n' "$nosrc_out" | grep -q 'did not roll'; then
 fi
 echo "   the refusal named the missing checkout and the materialize command; the stale diagnosis is gone"
 
-echo "== verb:git-submodules bump ORDER (pinned_from is itself rolled first) =="
+echo "== verb:git-submodules ff ORDER (pinned_from is itself rolled first) =="
 . "$FIX/order"; . "$FIX/leafshas"
-(cd "$FIX/umb2" && "$CH" task order-bump) | grep -q '0 failed' || { echo "FAIL: order-bump did not run" >&2; exit 1; }
+(cd "$FIX/umb2" && "$CH" task order-ff) | grep -q '0 failed' || { echo "FAIL: order-ff did not run" >&2; exit 1; }
 src_got="$(git -C "$FIX/umb2" ls-files -s src | awk '{print $2}')"
 tgt_got="$(git -C "$FIX/umb2" ls-files -s target2 | awk '{print $2}')"
 [ "$src_got" = "$B" ] || { echo "FAIL: src did not roll to $B (got $src_got)" >&2; exit 1; }
 [ "$tgt_got" = "$L2" ] || { echo "FAIL: target2 pinned to $tgt_got, want L2=$L2 (L1=$L1 means stale src read)" >&2; exit 1; }
 
-echo "== verb:git-submodules currency (after the ordered bump every pin must be CURRENT) =="
+echo "== verb:git-submodules currency (after the ordered ff every pin must be CURRENT) =="
 # The walk reads the recorded gitlinks and the REMOTE only, so a green run here is a claim
 # about what the upstreams serve — not about the local checkouts. opencharly/charly#936.
 cur_out="$(cd "$FIX/umb2" && "$CH" task currency 2>&1)"
 echo "$cur_out" | grep -q 'currency: 0 of ' || { echo "FAIL: currency must report zero pins off their ref; got: $cur_out" >&2; exit 1; }
-echo "$cur_out" | grep -q 'producer-first legs: none' || { echo "FAIL: no leg must remain after the ordered bump; got: $cur_out" >&2; exit 1; }
+echo "$cur_out" | grep -q 'producer-first legs: none' || { echo "FAIL: no leg must remain after the ordered ff; got: $cur_out" >&2; exit 1; }
 
 echo "== verb:git-submodules currency (an edge over an edge must be REFUSED, never answered) =="
 # The depth rule is the whole difference from the contract this replaces: that one was
@@ -615,124 +615,27 @@ fi
 echo "$exp_out" | grep -q 'graph depth > 1' || { echo "FAIL: the refusal must name the depth; got: $exp_out" >&2; exit 1; }
 echo "$exp_out" | grep -q 'which is ITSELF an edge' || { echo "FAIL: the refusal must name the source's shape; got: $exp_out" >&2; exit 1; }
 
-# ---------------------------------------------------------------------------
-# 2b) verb:git-submodules currency — the STALENESS bound.
-#
-# The bound is on THIS repo's OWN advance cadence — the AGE of the last commit
-# that touched the pin — and never on the pin's distance from the served ref.
-# MEASURED on charly's own six box/* twins: each is behind its served ref about
-# 75% of wall-clock time, with continuous behind-windows of 8 and 10 days, while
-# the healthy maximum gap between advances was 5 days. A gate on the DISTANCE
-# would therefore be red on a healthy tree, which trains every reader to ignore
-# it. The AGE is what neglect looks like.
-#
-# The two fixtures below are the SAME tree with the SAME behind pin and the SAME
-# bound; they differ ONLY in the date of the commit that recorded the pin, and
-# the verdict flips with it. That difference is the whole point of the knob.
-# ---------------------------------------------------------------------------
-. "$FIX/shas"
-stale_fixture() {
-  # The task name and the bound are parameters because every arm's output must be
-  # identifiable by ITSELF. Two arms used to share one fixture — and therefore one
-  # recorded SHA — so an evidence paste keyed only by the SHA was ambiguous: the
-  # same key selected the healthy arm's verdict. Now each arm has its OWN fixture
-  # (so its own SHA) and its OWN task name (which appears in its own output), and
-  # an evidence paste is keyed by the arm, not by a SHA.
-  local dir="$1" stamp="$2" task="${3:-currency-stale}" bound="${4:-168h}"
-  mkdir -p "$dir"
-  (
-    cd "$dir" && git init -q -b main
-    echo u > u.txt && git add -A && G commit -qm u
-    printf '[submodule "gap"]\n\tpath = gap\n\turl = %s\n\tbranch = main\n' "$FIX/subsrc" > .gitmodules
-    git add .gitmodules && G commit -qm gm
-    git update-index --add --cacheinfo "160000,$C1,gap"
-    GIT_AUTHOR_DATE="$stamp" GIT_COMMITTER_DATE="$stamp" G commit -qm "pin gap"
-    # Materialize the checkout so the pin is judged against the served ref (behind),
-    # not merely "differs (no checkout to judge ancestry)".
-    git -c protocol.file.allow=always submodule update --init -q gap
-  )
-  cat > "$dir/charly.yml" <<YML
-$task:
-  task:
-    description: ask whether every pin is current, with a bound on this repo's own neglect
-    dir: .
-    plan:
-      - check: no pin is neglected past the bound
-        git-submodules: {mode: currency, stale_after: "$bound"}
-        context: [runtime]
-YML
-}
-
-echo "== verb:git-submodules currency (stale_after: a pin NEGLECTED past the bound must FAIL) =="
-stale_fixture "$WORK/stale-old" "2020-01-01T00:00:00Z"
-if stale_out="$(cd "$WORK/stale-old" && "$CH" task currency-stale 2>&1)"; then
-  echo "FAIL: a pin neglected for years must fail the bound" >&2; exit 1
+echo "== verb:git-submodules currency (a pin BEHIND its branch tip must FAIL) =="
+# STRICT currency: the recorded gitlink must EQUAL the tip of the branch .gitmodules
+# declares, so `behind` is a FAILURE — not a reported pass — and the message names the
+# remedy `charly task ff`. The ordered ff above left every pin current; rewinding `src`
+# to A in the index makes exactly one pin behind, so the arm isolates the strictness.
+. "$FIX/order"
+(cd "$FIX/umb2" && git update-index --add --cacheinfo "160000,$A,src")
+if behind_out="$(cd "$FIX/umb2" && "$CH" task currency 2>&1)"; then
+  echo "FAIL: a pin behind its branch tip must FAIL" >&2
+  printf '%s\n' "$behind_out" >&2; exit 1
 fi
-printf '%s\n' "$stale_out" | grep -q 'STALE pin(s)' || {
-  echo "FAIL: the verdict must name the stale pin(s); got: $stale_out" >&2; exit 1; }
-printf '%s\n' "$stale_out" | grep -q 'has not advanced it for' || {
-  echo "FAIL: the verdict must name the age; got: $stale_out" >&2; exit 1; }
-printf '%s\n' "$stale_out" | grep -q '(bound 168h)' || {
-  echo "FAIL: the verdict must name the bound; got: $stale_out" >&2; exit 1; }
-printf '%s\n' "$stale_out" | sed 's/^/   | /'
-
-echo "== verb:git-submodules currency (stale_after: the SAME pin, advanced recently, must PASS) =="
-stale_fixture "$WORK/stale-fresh" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" currency-fresh
-fresh_out="$(cd "$WORK/stale-fresh" && "$CH" task currency-fresh 2>&1)" || {
-  echo "FAIL: a pin advanced just now is churn, not neglect" >&2; printf '%s\n' "$fresh_out" >&2; exit 1; }
-printf '%s\n' "$fresh_out" | grep -q '0 failed' || {
-  echo "FAIL: the run must pass; got: $fresh_out" >&2; exit 1; }
-printf '%s\n' "$fresh_out" | grep -q '1 of 1 pin(s) NOT current' || {
-  echo "FAIL: the not-current count must still be reported; got: $fresh_out" >&2; exit 1; }
-echo "   the same behind pin, advanced recently, passed the bound"
-
-echo "== verb:git-submodules currency (stale_after: a NON-POSITIVE bound must be REFUSED) =="
-# Zero (or less) is not a bound: it would mark EVERY not-current pin stale, which is
-# the permanently-red gate the knob exists to avoid. The verb refuses it rather than
-# honouring an operator error that would silently disarm the control in the other
-# direction.
-#
-# This arm has its OWN fixture, so its recorded SHA is its own and cannot be confused
-# with the healthy arm's SHA; and its own task name, which appears in its own output.
-stale_fixture "$WORK/stale-nonpositive" "2020-01-01T00:00:00Z" currency-nonpositive 0s
-if nonpos_out="$(cd "$WORK/stale-nonpositive" && "$CH" task currency-nonpositive 2>&1)"; then
-  echo "FAIL: a non-positive bound must be refused" >&2; printf '%s\n' "$nonpos_out" >&2; exit 1
-fi
-printf '%s\n' "$nonpos_out" | sed 's/^/   | /'
-printf '%s\n' "$nonpos_out" | grep -q 'not a POSITIVE duration' || {
-  echo "FAIL: the refusal must name the reason; got: $nonpos_out" >&2; exit 1; }
-printf '%s\n' "$nonpos_out" | grep -q 'STALE pin(s)' && {
-  echo "FAIL: a refused bound must not judge staleness; got: $nonpos_out" >&2; exit 1; }
-echo "   a bound of zero was refused, and no staleness was judged"
-
-echo "== verb:git-submodules currency (an UNREADABLE history is not neglect) =="
-# The same neglect fixture, with its HEAD commit object removed, so the history
-# genuinely cannot be read. The age of the last advance is then UNKNOWN — and an
-# unknown is not a claim that the owner neglected the pin. The verdict names the read
-# failure and never says STALE.
-stale_fixture "$WORK/stale-unreadable" "2020-01-01T00:00:00Z" currency-unreadable
-unread_sha="$(cd "$WORK/stale-unreadable" && git rev-parse HEAD)"
-rm -f "$WORK/stale-unreadable/.git/objects/${unread_sha:0:2}/${unread_sha:2}"
-# DEMONSTRATE that the removal genuinely broke the read the verb performs, so this
-# arm cannot pass for the wrong reason (a no-op removal would leave a readable
-# history and the arm would prove nothing). The very same read must FAIL here and
-# SUCCEED on the healthy fixture.
-if (cd "$WORK/stale-unreadable" && git log -1 --format=%ct -- gap) >/dev/null 2>&1; then
-  echo "FAIL: the unreadable fixture's history read must FAIL, or this arm proves nothing" >&2; exit 1
-fi
-if ! (cd "$WORK/stale-old" && git log -1 --format=%ct -- gap) >/dev/null 2>&1; then
-  echo "FAIL: the healthy fixture's history read must SUCCEED, or the contrast proves nothing" >&2; exit 1
-fi
-echo "   the fixture's history read genuinely fails, and the healthy fixture's succeeds"
-if unread_out="$(cd "$WORK/stale-unreadable" && "$CH" task currency-unreadable 2>&1)"; then
-  echo "FAIL: an unreadable history must fail, not pass" >&2; printf '%s\n' "$unread_out" >&2; exit 1
-fi
-printf '%s\n' "$unread_out" | sed 's/^/   | /'
-printf '%s\n' "$unread_out" | grep -q 'could not be read' || {
-  echo "FAIL: the verdict must name the read failure; got: $unread_out" >&2; exit 1; }
-printf '%s\n' "$unread_out" | grep -q 'STALE pin(s)' && {
-  echo "FAIL: an unreadable history must never be reported as neglect; got: $unread_out" >&2; exit 1; }
-echo "   an unreadable history was reported as unreadable, not as neglect"
+printf '%s\n' "$behind_out" | sed 's/^/   | /'
+printf '%s\n' "$behind_out" | grep -q '1 behind' || {
+  echo "FAIL: the failure must name the behind pin; got: $behind_out" >&2; exit 1; }
+printf '%s\n' "$behind_out" | grep -q 'NOT current' || {
+  echo "FAIL: the failure must lead with the not-current count; got: $behind_out" >&2; exit 1; }
+printf '%s\n' "$behind_out" | grep -q 'charly task ff' || {
+  echo "FAIL: the failure must name the remedy; got: $behind_out" >&2; exit 1; }
+echo "   the behind pin failed, with the not-current count and the ff remedy named"
+# Restore the fixture the later arms read: src back at the tip it fast-forwarded to.
+(cd "$FIX/umb2" && git update-index --add --cacheinfo "160000,$B,src")
 
 echo "== verb:file-parity (identical must PASS, drift must FAIL) =="
 par_out="$("$CH" task parity)"; echo "$par_out" | grep -q '0 failed' || { echo "FAIL: identical pair must pass" >&2; exit 1; }

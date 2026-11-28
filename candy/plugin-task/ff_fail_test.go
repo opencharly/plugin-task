@@ -15,9 +15,9 @@ import (
 // them" -- and an ordering that puts 422 names first makes that promise unkeepable.
 //
 // This test drives runMaintenanceVerbIn -- the function the gate itself uses -- so it fails if the summary
-// regresses to names-first. Coverage fails without the change: the pre-fix StatusFail string began
-// "bumped %d submodule pin(s): <names>; %d FAILED: ...", i.e. the names led and the count of failures did not.
-func TestGitSubmodules_BumpSummaryLeadsWithFailures(t *testing.T) {
+// regresses to names-first. Coverage fails without the change: the pre-fix StatusFail string led with the
+// rolled/pinned name list and appended the failure count after it.
+func TestGitSubmodules_FFSummaryLeadsWithFailures(t *testing.T) {
 	umb := t.TempDir()
 	gitIn(t, umb, "init", "-q", "-b", "main")
 	gitIn(t, umb, "config", "user.email", "a@b.c")
@@ -38,7 +38,7 @@ func TestGitSubmodules_BumpSummaryLeadsWithFailures(t *testing.T) {
 	// must record a failure and return StatusFail. This reaches the failing branch without needing a contended
 	// lock, which a fixture cannot produce.
 	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{
-		"mode":        "bump",
+		"mode":        "ff",
 		"pinned_from": "child",
 		"pin_map":     map[string]any{"child": "does/not/exist"},
 	})
