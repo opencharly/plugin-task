@@ -250,7 +250,7 @@ func printCapturedValue(results []*runResult) {
 // alone is not the whole result: a step's `Result.Message` carries the VERB's own
 // output — a FAIL's diagnostic (`exit=2, want 0 (stderr: …)`) AND a passing verb's
 // payload (verb:git-submodules prints its `PATH BRANCH PIN` table or its
-// `bumped N …` summary there; verb:command reports `exit=N`). The reporter used to
+// `pinned N …` summary there; verb:command reports `exit=N`). The reporter used to
 // print only `firstLine(Text)`, so a passing step's output was discarded and a
 // failing step's cause was INVISIBLE — `charly task map` printed no map, and a real
 // failure (`unable to create index.lock`) reported only `[fail] run — …` with no
@@ -453,7 +453,7 @@ func nestedVerdict(name string, r *runResult) (spec.Status, string) {
 // no field for nested steps. A bare "N step(s) failed" therefore made a composite
 // task's failure un-diagnosable: the leaf step's own reason exists at the top level
 // (printResultText prints every step) and was DESTROYED exactly at the hop. That cost
-// the umbrella a ~424-submodule `task sync` failure whose cause was transient and
+// the umbrella an `ff` failure over ~424 submodules whose cause was transient and
 // consequently unknowable (plugin-task#12) — an R1 "root-cause every anomaly" failure,
 // because the harness itself made the anomaly un-diagnosable.
 //

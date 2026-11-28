@@ -15,7 +15,7 @@ import (
 //
 // `verify` compares a value it reads from THIS repo's index (the recorded gitlink) against a
 // value that belongs to ANOTHER repo (the submodule checkout's HEAD), and those two are
-// maintained by different verbs: `charly task sync` materialises an advance and stages it,
+// maintained by different verbs: `charly task ff` materialises an advance and stages it,
 // while the sanctioned branch flow (`git switch -c <b> origin/main`, `git reset`,
 // `git stash pop`, an aborted commit) rewrites the index and silently un-stages it. The
 // pre-fix code reported every mismatch as `HEAD <h> != gitlink <g>` — the same string a
@@ -58,7 +58,7 @@ func TestGitSubmodules_VerifyNamesTheMismatchDirection(t *testing.T) {
 		}
 	}
 
-	// Arm 1 — the checkout is AHEAD of the index: `charly task sync`'s own advance, after its
+	// Arm 1 — the checkout is AHEAD of the index: `charly task ff`'s own advance, after its
 	// staging was rewritten. The gate must still FAIL (committing now records the OLD pin) and
 	// must say which way AND what to run.
 	recordGitlink(parent)

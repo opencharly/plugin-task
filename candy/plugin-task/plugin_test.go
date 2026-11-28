@@ -359,8 +359,8 @@ func TestRunTask_TalliesFailure(t *testing.T) {
 
 // TestFormatStepLine_RendersStepMessage proves a step's Result.Message reaches the
 // text output. That message is the ONLY carrier of a verb's own output: the
-// `git-submodules` verb's `PATH BRANCH PIN` table (status) and `bumped N …` summary
-// (bump) ride there, a FAIL's diagnostic (`exit=2, want 0 (stderr: …)`) rides there,
+// `git-submodules` verb's `PATH BRANCH PIN` table (status) and `pinned N …` summary
+// (ff) ride there, a FAIL's diagnostic (`exit=2, want 0 (stderr: …)`) rides there,
 // and verb:command reports its exit there. The reporter printed only the authored
 // Text, so `charly task map` printed no map and a real failure (`index.lock exists`)
 // showed no reason. This test FAILS on that behaviour.
@@ -379,7 +379,7 @@ func TestFormatStepLine_RendersStepMessage(t *testing.T) {
 	}
 	// A FAIL's diagnostic must be visible (the dead-end RCA this fixes).
 	got = formatStepLine(spec.StepResult{
-		Keyword: "run", Text: "bump the pins",
+		Keyword: "run", Text: "advance the pins",
 		Result: spec.CheckResult{Status: spec.StatusFail, Message: "pin x -> origin/main failed: fatal: index.lock exists"},
 	})
 	if !strings.Contains(got, "index.lock exists") {

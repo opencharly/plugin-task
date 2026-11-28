@@ -13,7 +13,7 @@ compiled into charly.
 | `kind:task` | a `task:` node in `charly.yml` | a named, reusable plan using the same `#Step`/`#Op` grammar a candy's `plan:` uses |
 | `command:task` | `charly task [list] [<name>] …` | run a task (and its `depends_on` closure) on the host |
 | `verb:task` | `task:` verb step in a plan | compose a declared task into a candy/box/task plan |
-| `verb:git-submodules` | `git-submodules:` verb step | status / bump / verify / currency over `.gitmodules` pins. `verify` asserts CONSISTENCY (each checkout matches the recorded gitlink); `currency` asserts CURRENCY (each pin is the ref its INTENT names), which no other mode answers |
+| `verb:git-submodules` | `git-submodules:` verb step | status / ff / verify / currency over `.gitmodules` pins. `ff` FAST-FORWARDS every pin, refusing a non-fast-forward; `verify` asserts CONSISTENCY (each checkout matches the recorded gitlink); `currency` asserts CURRENCY (each pin EQUALS the ref its INTENT names — `behind` FAILS), which no other mode answers |
 | `verb:file-parity` | `file-parity:` verb step | check / sync that paired files are byte-identical |
 | `verb:splice-region` | `splice-region:` verb step | splice a marked region from a fragment into a target |
 | `verb:module-pins` | `module-pins:` verb step | adopt a source go.mod's require pins across every module a glob matches, then tidy |
@@ -29,33 +29,41 @@ distro list is baked in. They are host-native: like the task engine they act on 
 repository checkout the charly process runs in.
 
 ```yaml
-# Bump every submodule pin to the ref its INTENT names: everything not listed in
-# pin_map rolls to its own default-branch HEAD (a LEAF), and every pin_map entry is
-# then derived from its pinned_from twin (an EDGE).
-sync:
+# FAST-FORWARD every submodule pin to the ref its INTENT names: everything not listed
+# in pin_map advances to its own default-branch HEAD (a LEAF), and every pin_map entry
+# is then derived from its pinned_from twin (an EDGE).
+#
+# ff only ever ADVANCES. A move whose target does not descend from the checkout's
+# current HEAD is REFUSED — the path, both commits and the direction are named, and that
+# submodule is left exactly as it was (not switched, not staged, its nested checkouts
+# not reconciled). A path with no checkout is advanced in the superproject's index.
+ff:
   task:
-    description: Bump all submodule pins to the ref each pin's intent names
+    description: Fast-forward all submodule pins to the ref each pin's intent names
     plan:
-      - run: bump the pins
+      - run: fast-forward the pins
         git-submodules:
-          mode: bump
+          mode: ff
           pinned_from: charly
           pin_map:
             box/arch: box/arch
             box/fedora: box/fedora
         context: [deploy]
 
-# Ask the OTHER question — the one `verify` does not answer: is every recorded pin
-# the ref its owning repo actually SERVES? It reads the recorded gitlinks and the
-# REMOTES only, so it needs no checkout and cannot inherit an index-vs-checkout seam.
+# Ask the OTHER question — the one `verify` does not answer: does every recorded pin
+# EQUAL the tip of the ref its owning repo actually SERVES? It reads the recorded
+# gitlinks and the REMOTES only, so it needs no checkout and cannot inherit an
+# index-vs-checkout seam.
 #
 # `intent` says where each pin's value is supposed to come from:
 #   "upstream:<ref>"       a LEAF, judged against the remote ref
 #   (a pin_map entry)      an EDGE, judged by whether the SOURCE's own pin at the twin
 #                          path is current — one hop further than its gitlink
 # An edge over an edge is REFUSED (the graph is acyclic by construction); a source that
-# declares no ref for the twin is a failure naming what to declare. A pin that is merely
-# behind is reported as a LEG, with the producer-first order to work through.
+# declares no ref for the twin is a failure naming what to declare. `behind`,
+# `not-on-the-served-line` and a `blocked-by` that names a real producer leg all FAIL,
+# and the message names the remedy: `charly task ff`. The ONE reported non-failure is
+# `differs (no checkout to judge ancestry)`, which is genuinely unjudgeable.
 currency:
   task:
     description: Report every pin that is not at the ref its intent names
@@ -67,24 +75,6 @@ currency:
           pin_map:
             box/arch: box/arch
         context: [runtime]
-
-# `stale_after` is OPT-IN and bounds NEGLECT, not churn. A pin that is not current
-# AND that this repo has not advanced for LONGER than the bound is STALE, and a
-# stale pin FAILS. The bound is on the AGE of this repo's last advance of that
-# path — never on the pin's distance from the served ref: a busy upstream is behind
-# between every wave, so a gate that failed on the distance would be permanently
-# red on a healthy tree, which trains every reader to ignore it. Leave it unset and
-# the verdict is the structural one alone.
-#
-# The bound must be a POSITIVE duration: zero (or less) is refused rather than
-# honoured, because it would mark EVERY not-current pin stale — the permanently-red
-# gate this knob exists to avoid.
-#
-# The age is read from this repo's OWN history, and an UNREADABLE history is never
-# reported as neglect: it is a structural failure that names the read error, because
-# an unknown age is not a claim that the owner neglected the pin.
-#
-#   git-submodules: {mode: currency, stale_after: "168h"}
 
 # Assert the harness config files are identical to charly's twins.
 harness:

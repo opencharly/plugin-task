@@ -8,19 +8,19 @@ import (
 	"github.com/opencharly/spec/spec"
 )
 
-// The bump summary must name WHAT CHANGED, and it must be legible when it fails.
+// The `ff` summary must name WHAT CHANGED, and it must be legible when it fails.
 //
-// Before the fix the summary printed len(done) as "bumped N submodule pin(s)", where `done` accumulated the
+// Before the fix the summary printed len(done) as ONE count of submodule pins, where `done` accumulated the
 // phase-1 ROLLS (every non-pin_map submodule, 422 of 428 on a real umbrella) and never distinguished them
-// from the phase-2 PINS (the pin_map entries, <= 6). Measured on the live umbrella: "bumped 422 submodule
-// pin(s)" after staging exactly two gitlinks.
+// from the phase-2 PINS (the pin_map entries, <= 6). Measured on the live umbrella: one count of 422
+// submodule pin(s) after staging exactly two gitlinks.
 //
 // This test drives runMaintenanceVerbIn -- the function the gate itself uses -- rather than a helper beside
 // the call site, because a test beside the call site passes after the very regression it exists to catch.
 // (That mistake is recorded in nested_checkout_test.go's own comment; it is not repeated here.)
 //
 // Coverage fails without the change: the pre-fix PASS text contains neither "rolling" nor a pin count.
-func TestGitSubmodules_BumpSummaryNamesPinsAndRolls(t *testing.T) {
+func TestGitSubmodules_FFSummaryNamesPinsAndRolls(t *testing.T) {
 	umb := t.TempDir()
 	gitIn(t, umb, "init", "-q", "-b", "main")
 	gitIn(t, umb, "config", "user.email", "a@b.c")
@@ -47,9 +47,9 @@ func TestGitSubmodules_BumpSummaryNamesPinsAndRolls(t *testing.T) {
 		t.Fatal("fixture: the submodule did not advance")
 	}
 
-	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "ff"})
 	if st != spec.StatusPass {
-		t.Fatalf("bump must PASS on a clean fixture, got %s: %s", st, msg)
+		t.Fatalf("ff must PASS on a clean fixture, got %s: %s", st, msg)
 	}
 	// NO gitlink assertion here, deliberately. Phase 1 rolls each submodule to `origin/<branch>`, and a
 	// submodule created from a local TempDir has no origin remote, so `submoduleBranch` returns "" and the
@@ -57,11 +57,14 @@ func TestGitSubmodules_BumpSummaryNamesPinsAndRolls(t *testing.T) {
 	// supply remotes; what THIS test owns is the summary's wording -- the behaviour R7 requires coverage of.
 	// (Measured: with the gitlink assertion, this test failed on the fixture, and both message assertions below
 	// had already passed.)
-	// THE ASSERTION: rolls and pins are reported as distinct quantities, not one "bumped" count.
-	if !strings.Contains(msg, "rolling") {
-		t.Fatalf("bump summary does not report ROLLS separately; the pre-fix wording named only a bumped count: %q", msg)
+	// THE ASSERTION: rolls and pins are reported as distinct quantities, never as one
+	// count that conflates them. (The fixture rolls nothing and pins nothing — a submodule
+	// created from a local TempDir declares no branch — so the two clauses are asserted
+	// with their own zero counts, which a single conflated count could not produce.)
+	if !strings.Contains(msg, "after rolling 0 leaf submodule(s) to their default-branch HEAD") {
+		t.Fatalf("ff summary does not report ROLLS as their own quantity: %q", msg)
 	}
-	if strings.HasPrefix(msg, "bumped ") {
-		t.Fatalf("bump summary still reports rolls as pins bumped: %q", msg)
+	if !strings.Contains(msg, "pinned 0 pin_map entr(y|ies)") {
+		t.Fatalf("ff summary does not report the pin_map pins as their own quantity: %q", msg)
 	}
 }

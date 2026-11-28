@@ -6,13 +6,13 @@ import (
 	"testing"
 )
 
-// The bump must classify a submodule by the presence of its OWN .git and nothing else.
+// `ff` must classify a submodule by the presence of its OWN .git and nothing else.
 //
 // Measured (charly#864): in a fresh `git worktree` every submodule directory exists and holds
-// nothing. The bump used to PRE-FLIGHT those paths and refuse the whole run over them ("not an
+// nothing. `ff` used to PRE-FLIGHT those paths and refuse the whole run over them ("not an
 // initialized checkout"); it now ADVANCES them in the index (opencharly/plugin-task#37), and this
 // classification is what decides which of the two happens. So the test below is not about a
-// skip list any more: it is about the branch the bump takes.
+// skip list any more: it is about the branch `ff` takes.
 //
 // The presence of the submodule's own .git is also the ONLY thing this reads. A git command
 // inside an uninitialized directory would walk UP to the superproject and read its HEAD — the

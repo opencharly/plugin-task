@@ -11,7 +11,7 @@ import (
 	"github.com/opencharly/spec/spec"
 )
 
-// The bump report's MOVED counters must cover EVERY group the walk touches — not only
+// The `ff` report's MOVED counters must cover EVERY group the walk touches — not only
 // the index-advance group.
 //
 // opencharly/plugin-task#53 gave every group in the report a second number: how many
@@ -25,28 +25,28 @@ import (
 // Coverage fails without the change: the pre-change summary carries no moved count at
 // all, so neither assertion below can pass on the old tree.
 
-// TestGitSubmodules_BumpCountsRolledSubmodulesThatMoved covers the ROLL group: a path
+// TestGitSubmodules_FFCountsRolledSubmodulesThatMoved covers the ROLL group: a path
 // WITH a checkout, rolled onto its default branch's tip.
 //
-// The control is the SAME tree bumped TWICE: the walk writes the pin both times — it
+// The control is the SAME tree pinned TWICE: the walk writes the pin both times — it
 // must record where the pin is, even when the answer is "where it already was" — so
 // the touched count is identical and only the MOVED count can fall to zero. That is
 // the only comparison that discriminates a write count from a move count.
-func TestGitSubmodules_BumpCountsRolledSubmodulesThatMoved(t *testing.T) {
-	base, leafBare, doomedBare, L1, L2 := bumpOrigins(t)
+func TestGitSubmodules_FFCountsRolledSubmodulesThatMoved(t *testing.T) {
+	base, leafBare, doomedBare, L1, L2 := ffOrigins(t)
 	// `zebra` is a REAL submodule of a bare origin that serves `main` at L2, and the
 	// umbrella's index records it at L1 — the STALE-PIN shape a wave meets. A submodule
 	// created from a plain TempDir has no origin, so its path is skipped; this one has
 	// one, so the walk really rolls it.
-	umb := newBumpUmbrella(t, base, L1, leafBare, doomedBare, "zebra")
+	umb := newFFUmbrella(t, base, L1, leafBare, doomedBare, "zebra")
 	if got := gitlink(umb, "zebra"); got != L1 {
 		t.Fatalf("fixture precondition: the recorded pin must be the STALE L1, got %s (L1=%s L2=%s)", got, L1, L2)
 	}
 
-	// BUMP ONE: the checkout sits at the stale pin, so the roll MOVES it.
-	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
+	// FF ONE: the checkout sits at the stale pin, so the roll MOVES it.
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "ff"})
 	if st != spec.StatusPass {
-		t.Fatalf("a bump over a stale materialised pin must PASS, got %s: %s", st, msg)
+		t.Fatalf("`ff` over a stale materialised pin must PASS, got %s: %s", st, msg)
 	}
 	if !strings.Contains(msg, "rolling 1 leaf submodule(s) to their default-branch HEAD (1 moved)") {
 		t.Fatalf("the report must name the roll AND that the roll moved the pin: %q", msg)
@@ -58,22 +58,22 @@ func TestGitSubmodules_BumpCountsRolledSubmodulesThatMoved(t *testing.T) {
 		t.Fatalf("the roll did not move the pin: gitlink=%s want L2=%s (L1=%s)", got, L2, L1)
 	}
 
-	// BUMP TWO: the SAME tree, whose pin is now current. The walk still writes the pin,
+	// FF TWO: the SAME tree, whose pin is now current. The walk still writes the pin,
 	// so the touched count is unchanged and the MOVED count is zero. A report that
 	// counted writes would print the same number twice.
-	st, msg = runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
+	st, msg = runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "ff"})
 	if st != spec.StatusPass {
-		t.Fatalf("the second bump over a current pin must PASS, got %s: %s", st, msg)
+		t.Fatalf("the second ff over a current pin must PASS, got %s: %s", st, msg)
 	}
 	if !strings.Contains(msg, "rolling 1 leaf submodule(s) to their default-branch HEAD (0 moved)") {
 		t.Fatalf("the write count must not change and the moved count must fall to zero: %q", msg)
 	}
 	if !strings.Contains(msg, "0 pin(s) moved") {
-		t.Fatalf("a bump over a current pin must report ZERO moved pins: %q", msg)
+		t.Fatalf("`ff` over a current pin must report ZERO moved pins: %q", msg)
 	}
 }
 
-// TestGitSubmodules_BumpCountsPinMapEdgeOnceInTheEdgeClause covers the EDGE group, and
+// TestGitSubmodules_FFCountsPinMapEdgeOnceInTheEdgeClause covers the EDGE group, and
 // the property the three groups exist to have: they PARTITION the paths the walk
 // touched, so a pin is counted ONCE and the moved counters SUM to the moved total.
 //
@@ -86,7 +86,7 @@ func TestGitSubmodules_BumpCountsRolledSubmodulesThatMoved(t *testing.T) {
 //
 // The source rolls too, so the report carries all three counters at once and the SUM
 // is observable: 1 rolled + 0 in the index + 1 edge = 2 moved.
-func TestGitSubmodules_BumpCountsPinMapEdgeOnceInTheEdgeClause(t *testing.T) {
+func TestGitSubmodules_FFCountsPinMapEdgeOnceInTheEdgeClause(t *testing.T) {
 	base := t.TempDir()
 
 	// `inner` — the leaf the edge points AT.
@@ -149,13 +149,13 @@ func TestGitSubmodules_BumpCountsPinMapEdgeOnceInTheEdgeClause(t *testing.T) {
 	// The source's checkout sits at the stale pin, so the roll really moves it.
 	gitIn(t, umb, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "src")
 
-	// BUMP ONE: the source rolls (its pin moves) and the edge advances to the twin
+	// FF ONE: the source rolls (its pin moves) and the edge advances to the twin
 	// (its pin moves). Exactly TWO pins moved, and each is counted ONCE.
 	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{
-		"mode": "bump", "pinned_from": "src", "pin_map": map[string]any{"edge": "inner"},
+		"mode": "ff", "pinned_from": "src", "pin_map": map[string]any{"edge": "inner"},
 	})
 	if st != spec.StatusPass {
-		t.Fatalf("a bump over a stale source and a stale edge must PASS, got %s: %s", st, msg)
+		t.Fatalf("`ff` over a stale source and a stale edge must PASS, got %s: %s", st, msg)
 	}
 	// THE ASSERTION, part 1: the edge is counted in the EDGE clause, and it MOVED.
 	if !strings.Contains(msg, "pinned 1 pin_map entr(y|ies) (edge; 1 moved)") {
@@ -182,13 +182,13 @@ func TestGitSubmodules_BumpCountsPinMapEdgeOnceInTheEdgeClause(t *testing.T) {
 		t.Fatalf("the source did not roll: gitlink=%s want %s", got, s2)
 	}
 
-	// BUMP TWO: the SAME tree, whose pins are now current. The walk writes every pin
+	// FF TWO: the SAME tree, whose pins are now current. The walk writes every pin
 	// again, so the touched counts are unchanged and every MOVED count is zero.
 	st, msg = runMaintenanceVerbIn(umb, "git-submodules", map[string]any{
-		"mode": "bump", "pinned_from": "src", "pin_map": map[string]any{"edge": "inner"},
+		"mode": "ff", "pinned_from": "src", "pin_map": map[string]any{"edge": "inner"},
 	})
 	if st != spec.StatusPass {
-		t.Fatalf("the second bump over current pins must PASS, got %s: %s", st, msg)
+		t.Fatalf("the second ff over current pins must PASS, got %s: %s", st, msg)
 	}
 	if !strings.Contains(msg, "pinned 1 pin_map entr(y|ies) (edge; 0 moved)") {
 		t.Fatalf("the edge is still TOUCHED, so the touched count must not change, and it moved nothing: %q", msg)
@@ -197,7 +197,7 @@ func TestGitSubmodules_BumpCountsPinMapEdgeOnceInTheEdgeClause(t *testing.T) {
 		t.Fatalf("the edge must still be absent from the index-advance group: %q", msg)
 	}
 	if !strings.Contains(msg, "0 pin(s) moved") {
-		t.Fatalf("a bump over current pins must report ZERO moved pins: %q", msg)
+		t.Fatalf("`ff` over current pins must report ZERO moved pins: %q", msg)
 	}
 }
 
@@ -213,13 +213,13 @@ func TestGitSubmodules_BumpCountsPinMapEdgeOnceInTheEdgeClause(t *testing.T) {
 // PRESENCE and not CORRECTNESS. The stale materialised pin is what makes the roll move
 // one pin; the twin that does not exist in the source's tree is what makes the wave
 // fail.
-func TestGitSubmodules_BumpFailureReportCarriesTheMovedCounters(t *testing.T) {
-	base, leafBare, doomedBare, L1, _ := bumpOrigins(t)
-	umb := newBumpUmbrella(t, base, L1, leafBare, doomedBare, "zebra")
+func TestGitSubmodules_FFFailureReportCarriesTheMovedCounters(t *testing.T) {
+	base, leafBare, doomedBare, L1, _ := ffOrigins(t)
+	umb := newFFUmbrella(t, base, L1, leafBare, doomedBare, "zebra")
 
 	// The wave FAILS: the edge's twin does not exist in the source's tree.
 	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{
-		"mode": "bump", "pinned_from": "zebra", "pin_map": map[string]any{"edge": "does/not/exist"},
+		"mode": "ff", "pinned_from": "zebra", "pin_map": map[string]any{"edge": "does/not/exist"},
 	})
 	if st != spec.StatusFail {
 		t.Fatalf("an unresolvable twin must FAIL, got %s: %s", st, msg)
@@ -268,9 +268,9 @@ func TestGitSubmodules_BumpFailureReportCarriesTheMovedCounters(t *testing.T) {
 // The sum is asserted on the RELATION alone: the clause numbers are the business of
 // the group tests, and an assertion here on a clause would catch that defect one
 // clause earlier and leave the sum itself unexercised.
-func TestGitSubmodules_BumpMovedCountsSumToTheMovedTotal(t *testing.T) {
-	base, leafBare, doomedBare, L1, L2 := bumpOrigins(t)
-	umb := newBumpUmbrella(t, base, L1, leafBare, doomedBare, "zebra")
+func TestGitSubmodules_FFMovedCountsSumToTheMovedTotal(t *testing.T) {
+	base, leafBare, doomedBare, L1, L2 := ffOrigins(t)
+	umb := newFFUmbrella(t, base, L1, leafBare, doomedBare, "zebra")
 
 	// `quagga` — declared, unmaterialized, and already CURRENT. It is appended to the
 	// .gitmodules `zebra` already wrote, and its pin is recorded in the INDEX, because
@@ -294,9 +294,9 @@ func TestGitSubmodules_BumpMovedCountsSumToTheMovedTotal(t *testing.T) {
 		t.Fatalf("fixture precondition: quagga's recorded pin must be the remote's CURRENT tip %s, got %s", L2, got)
 	}
 
-	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "bump"})
+	st, msg := runMaintenanceVerbIn(umb, "git-submodules", map[string]any{"mode": "ff"})
 	if st != spec.StatusPass {
-		t.Fatalf("the bump must PASS, got %s: %s", st, msg)
+		t.Fatalf("`ff` must PASS, got %s: %s", st, msg)
 	}
 	rolled, index, edges, total := movedCounts(t, msg)
 	if rolled+index+edges != total {
@@ -308,7 +308,7 @@ func TestGitSubmodules_BumpMovedCountsSumToTheMovedTotal(t *testing.T) {
 	}
 }
 
-// movedCounts reads the four numbers out of a bump report: the three groups' moved
+// movedCounts reads the four numbers out of an `ff` report: the three groups' moved
 // counts and the moved total. It FAILS the test when the report does not carry them —
 // a report that stopped counting would otherwise pass a sum assertion over zeroes.
 //
@@ -326,7 +326,7 @@ func movedCounts(t *testing.T, msg string) (rolled, index, edges, total int) {
 	return rolled, index, edges, total
 }
 
-// movedCount extracts ONE number from a bump report. A missing number is a test
+// movedCount extracts ONE number from an `ff` report. A missing number is a test
 // failure, never a zero: a report that stopped counting would otherwise satisfy a sum
 // assertion over zeroes.
 func movedCount(t *testing.T, msg, pattern string) int {
